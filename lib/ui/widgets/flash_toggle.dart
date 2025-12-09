@@ -6,8 +6,14 @@ import '../theme/colors.dart';
 class FlashToggle extends StatefulWidget {
   final bool initialState;
   final ValueChanged<bool>? onChanged;
+  final bool isEnabled;
 
-  const FlashToggle({super.key, this.initialState = false, this.onChanged});
+  const FlashToggle({
+    super.key,
+    this.initialState = false,
+    this.onChanged,
+    this.isEnabled = true,
+  });
 
   @override
   State<FlashToggle> createState() => _FlashToggleState();
@@ -54,12 +60,24 @@ class _FlashToggleState extends State<FlashToggle>
   }
 
   @override
+  void didUpdateWidget(FlashToggle oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.initialState != oldWidget.initialState) {
+      setState(() {
+        _isOn = widget.initialState;
+      });
+    }
+  }
+
+  @override
   void dispose() {
     _controller.dispose();
     super.dispose();
   }
 
   void _toggle() {
+    if (!widget.isEnabled) return;
+
     setState(() {
       _isOn = !_isOn;
     });
@@ -79,19 +97,21 @@ class _FlashToggleState extends State<FlashToggle>
           return Transform.scale(
             scale: _scaleAnimation.value,
             child: Opacity(
-              opacity: _opacityAnimation.value,
+              opacity: widget.isEnabled ? _opacityAnimation.value : 0.3,
               child: Container(
                 width: 44,
                 height: 44,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: _isOn
+                  color: _isOn && widget.isEnabled
                       ? AppColors.primary.withOpacity(0.2)
                       : Colors.transparent,
                 ),
                 child: Icon(
                   _isOn ? Icons.flash_on_rounded : Icons.flash_off_rounded,
-                  color: _isOn ? AppColors.primary : AppColors.iconActive,
+                  color: widget.isEnabled
+                      ? (_isOn ? AppColors.primary : AppColors.iconActive)
+                      : AppColors.iconActive.withOpacity(0.5),
                   size: 26,
                 ),
               ),
