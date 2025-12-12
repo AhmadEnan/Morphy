@@ -1,0 +1,435 @@
+package com.example.morphy
+import android.app.Activity
+import android.content.Context
+import android.graphics.Bitmap
+import android.media.Image
+import android.net.Uri
+import android.os.Environment
+import android.util.Size
+import androidx.camera.core.*
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.LifecycleOwner
+import io.flutter.embedding.engine.plugins.FlutterPlugin
+import io.flutter.embedding.engine.plugins.activity.ActivityAware
+import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
+import io.flutter.plugin.common.MethodCall
+import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.MethodChannel.MethodCallHandler
+import io.flutter.plugin.common.MethodChannel.Result
+import io.flutter.view.TextureRegistry
+import ai.deepar.ar.*
+import com.google.common.util.concurrent.ListenableFuture
+import java.io.File
+import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.text.SimpleDateFormat
+import java.util.*
+import java.util.concurrent.ExecutionException
+class DeepARPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, AREventListener {
+    
+    private lateinit var channel: MethodChannel
+    private lateinit var textureRegistry: TextureRegistry
+    private var activity: Activity? = null
+    private var context: Context? = null
+    private var deepAR: DeepAR? = null
+    private var textureEntry: TextureRegistry.SurfaceTextureEntry? = null
+    private var cameraProviderFuture: ListenableFuture<ProcessCameraProvider>? = null
+    
+    private var lensFacing = CameraSelector.LENS_FACING_FRONT
+    private var buffers: Array<ByteBuffer>? = null
+    private var currentBuffer = 0
+    private val NUMBER_OF_BUFFERS = 2
+    
+    private var isDeepARInitialized = false
+    private var recording = false
+    private var videoFileName: File? = null
+    private var currentEffect = 0
+    
+    private val effects = listOf(
+        "none",
+        "viking_helmet.deepar",
+        "MakeupLook.deepar",
+        "Split_View_Look.deepar",
+        "Emotions_Exaggerator.deepar",
+        "Emotion_Meter.deepar",
+        "Stallone.deepar",
+        "flower_face.deepar",
+        "galaxy_background.deepar",
+        "Humanoid.deepar",
+        "Neon_Devil_Horns.deepar",
+        "Ping_Pong.deepar",
+        "Pixel_Hearts.deepar",
+        "Snail.deepar",
+        "Hope.deepar",
+        "Vendetta_Mask.deepar",
+        "Fire_Effect.deepar",
+        "burning_effect.deepar",
+        "Elephant_Trunk.deepar"
+    )
+    
+    override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        context = binding.applicationContext
+        textureRegistry = binding.textureRegistry
+        channel = MethodChannel(binding.binaryMessenger, "deepar_plugin")
+        channel.setMethodCallHandler(this)
+    }
+    
+    override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        channel.setMethodCallHandler(null)
+    }
+    
+    override fun onAttachedToActivity(binding: ActivityPluginBinding) {
+        activity = binding.activity
+    }
+    
+    override fun onDetachedFromActivityForConfigChanges() {
+        activity = null
+    }
+    
+    override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
+        activity = binding.activity
+    }
+    
+    override fun onDetachedFromActivity() {
+        cleanup()
+        activity = null
+    }
+    
+    override fun onMethodCall(call: MethodCall, result: Result) {
+        when (call.method) {
+            "initialize" -> {
+                val licenseKey = call.argument<String>("licenseKey") ?: ""
+                initialize(licenseKey, result)
+            }
+            "startCamera" -> {
+                startCamera(result)
+            }
+            "switchCamera" -> {
+                switchCamera(result)
+            }
+            "switchEffect" -> {
+                val effectName = call.argument<String>("effectName")
+                switchEffect(effectName, result)
+            }
+            "nextEffect" -> {
+                nextEffect(result)
+            }
+            "previousEffect" -> {
+                previousEffect(result)
+            }
+            "takeScreenshot" -> {
+                takeScreenshot(result)
+            }
+            "startRecording" -> {
+                startRecording(result)
+            }
+            "stopRecording" -> {
+                stopRecording(result)
+            }
+            "dispose" -> {
+                cleanup()
+                result.success(null)
+            }
+            else -> {
+                result.notImplemented()
+            }
+        }
+    }
+    
+    private fun initialize(licenseKey: String, result: Result) {
+        try {
+            activity?.let { act ->
+                deepAR = DeepAR(act)
+                deepAR?.setLicenseKey(licenseKey)
+                deepAR?.initialize(act, this)
+                result.success(true)
+            } ?: result.error("NO_ACTIVITY", "Activity not available", null)
+        } catch (e: Exception) {
+            result.error("INIT_ERROR", e.message, null)
+        }
+    }
+    
+    private fun startCamera(result: Result) {
+        activity?.let { act ->
+            // Create texture for rendering
+            textureEntry = textureRegistry.createSurfaceTexture()
+            val surfaceTexture = textureEntry!!.surfaceTexture()
+            surfaceTexture.setDefaultBufferSize(1920, 1080)
+            
+            // Set DeepAR to render to this surface
+            deepAR?.setRenderSurface(android.view.Surface(surfaceTexture), 1920, 1080)
+            
+            cameraProviderFuture = ProcessCameraProvider.getInstance(act)
+            cameraProviderFuture?.addListener({
+                try {
+                    val cameraProvider = cameraProviderFuture?.get()
+                    cameraProvider?.let { bindCamera(it) }
+                    // Return texture ID and dimensions to Flutter
+                    result.success(mapOf(
+                        "textureId" to textureEntry!!.id().toInt(),
+                        "width" to 1920,
+                        "height" to 1080
+                    ))
+                } catch (e: ExecutionException) {
+                    result.error("CAMERA_ERROR", e.message, null)
+                } catch (e: InterruptedException) {
+                    result.error("CAMERA_ERROR", e.message, null)
+                }
+            }, ContextCompat.getMainExecutor(act))
+        } ?: result.error("NO_ACTIVITY", "Activity not available", null)
+    }
+    
+    private fun bindCamera(cameraProvider: ProcessCameraProvider) {
+        val cameraResolution = Size(1920, 1080)
+        val cameraSelector = CameraSelector.Builder()
+            .requireLensFacing(lensFacing)
+            .build()
+        
+        // Initialize buffers
+        buffers = Array(NUMBER_OF_BUFFERS) {
+            ByteBuffer.allocateDirect(cameraResolution.width * cameraResolution.height * 4).apply {
+                order(ByteOrder.nativeOrder())
+                position(0)
+            }
+        }
+        
+        val imageAnalysis = ImageAnalysis.Builder()
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+            .setTargetResolution(cameraResolution)
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
+        
+        imageAnalysis.setAnalyzer(ContextCompat.getMainExecutor(activity!!)) { image ->
+            processImage(image)
+        }
+        
+        cameraProvider.unbindAll()
+        cameraProvider.bindToLifecycle(
+            activity as LifecycleOwner,
+            cameraSelector,
+            imageAnalysis
+        )
+    }
+    
+    private fun processImage(image: ImageProxy) {
+        // Only process frames if DeepAR is initialized
+        if (!isDeepARInitialized) {
+            image.close()
+            return
+        }
+        
+        val buffer = image.planes[0].buffer
+        buffer.rewind()
+        
+        buffers?.let { bufs ->
+            bufs[currentBuffer].clear()
+            bufs[currentBuffer].put(buffer)
+            bufs[currentBuffer].position(0)
+            
+            deepAR?.receiveFrame(
+                bufs[currentBuffer],
+                image.width,
+                image.height,
+                image.imageInfo.rotationDegrees,
+                lensFacing == CameraSelector.LENS_FACING_FRONT,
+                DeepARImageFormat.RGBA_8888,
+                image.planes[0].pixelStride
+            )
+            
+            currentBuffer = (currentBuffer + 1) % NUMBER_OF_BUFFERS
+        }
+        
+        image.close()
+    }
+    
+    private fun switchCamera(result: Result) {
+        lensFacing = if (lensFacing == CameraSelector.LENS_FACING_FRONT) {
+            CameraSelector.LENS_FACING_BACK
+        } else {
+            CameraSelector.LENS_FACING_FRONT
+        }
+        
+        try {
+            val cameraProvider = cameraProviderFuture?.get()
+            cameraProvider?.unbindAll()
+            cameraProvider?.let { bindCamera(it) }
+            result.success(true)
+        } catch (e: Exception) {
+            result.error("SWITCH_ERROR", e.message, null)
+        }
+    }
+    
+    private fun getFilterPath(filterName: String): String? {
+        return if (filterName == "none") null else "file:///android_asset/flutter_assets/assets/effects/$filterName"
+    }
+    
+    private fun switchEffect(effectName: String?, result: Result) {
+        effectName?.let {
+            deepAR?.switchEffect("effect", getFilterPath(it))
+            result.success(true)
+        } ?: result.error("INVALID_EFFECT", "Effect name is null", null)
+    }
+    
+    private fun nextEffect(result: Result) {
+        currentEffect = (currentEffect + 1) % effects.size
+        deepAR?.switchEffect("effect", getFilterPath(effects[currentEffect]))
+        result.success(effects[currentEffect])
+    }
+    
+    private fun previousEffect(result: Result) {
+        currentEffect = (currentEffect - 1 + effects.size) % effects.size
+        deepAR?.switchEffect("effect", getFilterPath(effects[currentEffect]))
+        result.success(effects[currentEffect])
+    }
+    
+    private fun takeScreenshot(result: Result) {
+        deepAR?.takeScreenshot()
+        result.success(true)
+    }
+    
+    private fun startRecording(result: Result) {
+        if (!recording) {
+            val timestamp = SimpleDateFormat("yyyy_MM_dd_HH_mm_ss", Locale.getDefault()).format(Date())
+            videoFileName = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
+                "deepar_video_$timestamp.mp4"
+            )
+            
+            deepAR?.startVideoRecording(videoFileName.toString(), 1920 / 2, 1080 / 2)
+            recording = true
+            result.success(videoFileName?.absolutePath)
+        } else {
+            result.error("ALREADY_RECORDING", "Already recording", null)
+        }
+    }
+    
+    private fun stopRecording(result: Result) {
+        if (recording) {
+            deepAR?.stopVideoRecording()
+            recording = false
+            result.success(videoFileName?.absolutePath)
+        } else {
+            result.error("NOT_RECORDING", "Not currently recording", null)
+        }
+    }
+    
+    private fun cleanup() {
+        try {
+            val cameraProvider = cameraProviderFuture?.get()
+            cameraProvider?.unbindAll()
+        } catch (e: Exception) {
+            // Ignore
+        }
+        
+        isDeepARInitialized = false
+        deepAR?.setAREventListener(null)
+        deepAR?.release()
+        deepAR = null
+        
+        textureEntry?.release()
+        textureEntry = null
+    }
+    
+    // AREventListener implementations
+    // All callbacks are called from background threads, so we need to use runOnUiThread
+    // to invoke Flutter method channel calls on the main thread
+    
+    override fun screenshotTaken(bitmap: Bitmap?) {
+        bitmap?.let {
+            val timestamp = SimpleDateFormat("yyyy_MM_dd_HH_mm_ss", Locale.getDefault()).format(Date())
+            val imageFile = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                "deepar_image_$timestamp.jpg"
+            )
+            
+            try {
+                val outputStream = FileOutputStream(imageFile)
+                it.compress(Bitmap.CompressFormat.JPEG, 100, outputStream)
+                outputStream.flush()
+                outputStream.close()
+                
+                activity?.runOnUiThread {
+                    channel.invokeMethod("onScreenshotTaken", mapOf("path" to imageFile.absolutePath))
+                }
+            } catch (e: Exception) {
+                activity?.runOnUiThread {
+                    channel.invokeMethod("onError", mapOf("error" to e.message))
+                }
+            }
+        }
+    }
+    
+    override fun videoRecordingStarted() {
+        activity?.runOnUiThread {
+            channel.invokeMethod("onVideoRecordingStarted", null)
+        }
+    }
+    
+    override fun videoRecordingFinished() {
+        activity?.runOnUiThread {
+            channel.invokeMethod("onVideoRecordingFinished", null)
+        }
+    }
+    
+    override fun videoRecordingFailed() {
+        activity?.runOnUiThread {
+            channel.invokeMethod("onVideoRecordingFailed", null)
+        }
+    }
+    
+    override fun videoRecordingPrepared() {
+        activity?.runOnUiThread {
+            channel.invokeMethod("onVideoRecordingPrepared", null)
+        }
+    }
+    
+    override fun shutdownFinished() {
+        activity?.runOnUiThread {
+            channel.invokeMethod("onShutdownFinished", null)
+        }
+    }
+    
+    override fun initialized() {
+        isDeepARInitialized = true
+        deepAR?.switchEffect("effect", getFilterPath(effects[currentEffect]))
+        activity?.runOnUiThread {
+            channel.invokeMethod("onInitialized", null)
+        }
+    }
+    
+    override fun faceVisibilityChanged(visible: Boolean) {
+        activity?.runOnUiThread {
+            channel.invokeMethod("onFaceVisibilityChanged", mapOf("visible" to visible))
+        }
+    }
+    
+    override fun imageVisibilityChanged(gameObject: String?, visible: Boolean) {
+        activity?.runOnUiThread {
+            channel.invokeMethod("onImageVisibilityChanged", mapOf(
+                "gameObject" to gameObject,
+                "visible" to visible
+            ))
+        }
+    }
+    
+    override fun frameAvailable(image: Image?) {
+        // Not used in this implementation
+    }
+    
+    override fun error(errorType: ARErrorType?, errorMessage: String?) {
+        activity?.runOnUiThread {
+            channel.invokeMethod("onError", mapOf(
+                "errorType" to errorType?.toString(),
+                "errorMessage" to errorMessage
+            ))
+        }
+    }
+    
+    override fun effectSwitched(effectName: String?) {
+        activity?.runOnUiThread {
+            channel.invokeMethod("onEffectSwitched", mapOf("effectName" to effectName))
+        }
+    }
+}

@@ -2,70 +2,138 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../theme/colors.dart';
 
-/// Filter data model
+/// Filter data model with DeepAR effect support
 class FilterItem {
   final String id;
   final String name;
   final List<Color> colors;
 
+  /// DeepAR effect filename (e.g., 'MakeupLook.deepar') or 'none' for no effect
+  final String effectFile;
+
   const FilterItem({
     required this.id,
     required this.name,
     required this.colors,
+    this.effectFile = 'none',
   });
 }
 
-/// Sample filters for demo
+/// DeepAR filters from assets/effects folder
 const List<FilterItem> sampleFilters = [
   FilterItem(
     id: 'original',
     name: 'Original',
     colors: [Color(0xFF333333), Color(0xFF555555)],
+    effectFile: 'none',
   ),
   FilterItem(
-    id: 'warm',
-    name: 'Warm',
-    colors: [Color(0xFFFF6B35), Color(0xFFF7C59F)],
+    id: 'makeup',
+    name: 'Makeup',
+    colors: [Color(0xFFFF6B9D), Color(0xFFC44569)],
+    effectFile: 'MakeupLook.deepar',
   ),
   FilterItem(
-    id: 'cool',
-    name: 'Cool',
-    colors: [Color(0xFF2E86AB), Color(0xFFA3CEF1)],
+    id: 'viking',
+    name: 'Viking',
+    colors: [Color(0xFF8B4513), Color(0xFFCD853F)],
+    effectFile: 'viking_helmet.deepar',
   ),
   FilterItem(
-    id: 'vintage',
-    name: 'Vintage',
+    id: 'stallone',
+    name: 'Stallone',
     colors: [Color(0xFFD4A373), Color(0xFFE9EDC9)],
+    effectFile: 'Stallone.deepar',
   ),
   FilterItem(
-    id: 'bw',
-    name: 'B&W',
-    colors: [Color(0xFF1A1A1A), Color(0xFF666666)],
+    id: 'flower',
+    name: 'Flower',
+    colors: [Color(0xFFFF69B4), Color(0xFFFFB6C1)],
+    effectFile: 'flower_face.deepar',
   ),
   FilterItem(
-    id: 'vivid',
-    name: 'Vivid',
-    colors: [Color(0xFFE63946), Color(0xFF457B9D)],
+    id: 'fire',
+    name: 'Fire',
+    colors: [Color(0xFFFF4500), Color(0xFFFF6347)],
+    effectFile: 'Fire_Effect.deepar',
   ),
   FilterItem(
-    id: 'sunset',
-    name: 'Sunset',
-    colors: [Color(0xFFFF7B00), Color(0xFFFFAA00)],
+    id: 'galaxy',
+    name: 'Galaxy',
+    colors: [Color(0xFF191970), Color(0xFF4B0082)],
+    effectFile: 'galaxy_background.deepar',
   ),
   FilterItem(
     id: 'neon',
     name: 'Neon',
     colors: [Color(0xFF00F5D4), Color(0xFFF15BB5)],
+    effectFile: 'Neon_Devil_Horns.deepar',
   ),
   FilterItem(
-    id: 'moody',
-    name: 'Moody',
+    id: 'humanoid',
+    name: 'Humanoid',
     colors: [Color(0xFF2D3142), Color(0xFF4F5D75)],
+    effectFile: 'Humanoid.deepar',
   ),
   FilterItem(
-    id: 'golden',
-    name: 'Golden',
+    id: 'hope',
+    name: 'Hope',
     colors: [Color(0xFFFFD700), Color(0xFFB8860B)],
+    effectFile: 'Hope.deepar',
+  ),
+  FilterItem(
+    id: 'elephant',
+    name: 'Elephant',
+    colors: [Color(0xFF808080), Color(0xFFA9A9A9)],
+    effectFile: 'Elephant_Trunk.deepar',
+  ),
+  FilterItem(
+    id: 'snail',
+    name: 'Snail',
+    colors: [Color(0xFF8B7355), Color(0xFFD2B48C)],
+    effectFile: 'Snail.deepar',
+  ),
+  FilterItem(
+    id: 'vendetta',
+    name: 'Vendetta',
+    colors: [Color(0xFF1A1A1A), Color(0xFF8B0000)],
+    effectFile: 'Vendetta_Mask.deepar',
+  ),
+  FilterItem(
+    id: 'pingpong',
+    name: 'Ping Pong',
+    colors: [Color(0xFFFF6600), Color(0xFFFFCC00)],
+    effectFile: 'Ping_Pong.deepar',
+  ),
+  FilterItem(
+    id: 'hearts',
+    name: 'Hearts',
+    colors: [Color(0xFFFF1493), Color(0xFFFF69B4)],
+    effectFile: 'Pixel_Hearts.deepar',
+  ),
+  FilterItem(
+    id: 'burning',
+    name: 'Burning',
+    colors: [Color(0xFFFF4500), Color(0xFF8B0000)],
+    effectFile: 'burning_effect.deepar',
+  ),
+  FilterItem(
+    id: 'emotions',
+    name: 'Emotions',
+    colors: [Color(0xFFFFD700), Color(0xFF32CD32)],
+    effectFile: 'Emotions_Exaggerator.deepar',
+  ),
+  FilterItem(
+    id: 'meter',
+    name: 'Meter',
+    colors: [Color(0xFF00CED1), Color(0xFF20B2AA)],
+    effectFile: 'Emotion_Meter.deepar',
+  ),
+  FilterItem(
+    id: 'split',
+    name: 'Split View',
+    colors: [Color(0xFF9370DB), Color(0xFF00CED1)],
+    effectFile: 'Split_View_Look.deepar',
   ),
 ];
 

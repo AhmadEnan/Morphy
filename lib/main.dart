@@ -14,7 +14,7 @@ void main() async {
 }
 
 class MorphyApp extends StatelessWidget {
-  const MorphyApp({super.key});
+  const MorphyApp({Key? key}) : super(key: key);
 
   @override
   Widget build(BuildContext context) {

@@ -1,19 +1,14 @@
-import 'dart:io';
-import 'dart:ui' as ui;
-import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
-import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../theme/colors.dart';
 import '../widgets/filter_selector.dart';
 import '../widgets/capture_button.dart';
-import '../widgets/flash_toggle.dart';
 import '../widgets/gender_indicator.dart';
 import '../widgets/intensity_slider.dart';
+import '../../services/deepar_service.dart';
 
-/// Main camera screen with full UI overlay
+/// Main camera screen with DeepAR integration
 class CameraScreen extends StatefulWidget {
   final bool syncFailed;
   final String? videoOutputFolderName;
@@ -32,29 +27,28 @@ class _CameraScreenState extends State<CameraScreen> {
   // Current filter state
   int _selectedFilterIndex = 0;
   double _filterIntensity = 0.5;
-  bool _isFlashOn = false;
   bool _isRecording = false;
 
-  CameraController? _controller;
-  List<CameraDescription>? _cameras;
-  bool _isCameraInitialized = false;
-
-  // For smooth switching
-  final GlobalKey _camKey = GlobalKey();
-  ui.Image? _lastFrame;
+  // DeepAR
+  late DeepARService _deepARService;
+  int? _textureId;
+  double _cameraAspectRatio = 9 / 16; // Portrait aspect ratio
+  bool _isDeepARInitialized = false;
+  bool _isFrontCamera = true;
 
   @override
   void initState() {
     super.initState();
-    _initializeCamera();
+    _deepARService = DeepARService();
+    _setupDeepARCallbacks();
+    _initializeDeepAR();
 
     if (widget.syncFailed) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        // Use root ScaffoldMessenger to ensure visibility
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Asset Synchronization Failed'),
-            duration: Duration(seconds: 4), // 4 seconds
+            duration: Duration(seconds: 4),
             backgroundColor: Colors.redAccent,
             behavior: SnackBarBehavior.floating,
           ),
@@ -63,37 +57,96 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
-  Future<void> _initializeCamera() async {
-    try {
-      _cameras = await availableCameras();
-      if (_cameras != null && _cameras!.isNotEmpty) {
-        // Default to first camera (usually back)
-        _controller = CameraController(
-          _cameras![0],
-          ResolutionPreset.high,
-          enableAudio: true,
-          imageFormatGroup: ImageFormatGroup.jpeg,
-        );
-
-        await _controller!.initialize();
-
-        // Start with flash off
-        await _controller!.setFlashMode(FlashMode.off);
-
-        if (mounted) {
-          setState(() {
-            _isCameraInitialized = true;
-          });
-        }
+  void _setupDeepARCallbacks() {
+    _deepARService.onInitialized = () {
+      if (mounted) {
+        setState(() {
+          _isDeepARInitialized = true;
+        });
       }
-    } catch (e) {
-      debugPrint('Camera initialization error: $e');
+      debugPrint('DeepAR initialized');
+    };
+
+    _deepARService.onScreenshotTaken = (path) {
+      _showMessage('Screenshot saved: $path');
+    };
+
+    _deepARService.onVideoRecordingStarted = () {
+      if (mounted) {
+        setState(() {
+          _isRecording = true;
+        });
+      }
+      debugPrint('Recording started');
+    };
+
+    _deepARService.onVideoRecordingFinished = () {
+      if (mounted) {
+        setState(() {
+          _isRecording = false;
+        });
+      }
+      debugPrint('Recording finished');
+    };
+
+    _deepARService.onVideoRecordingFailed = () {
+      if (mounted) {
+        setState(() {
+          _isRecording = false;
+        });
+      }
+      _showMessage('Recording failed');
+    };
+
+    _deepARService.onEffectSwitched = (effectName) {
+      debugPrint('Effect switched to: $effectName');
+    };
+
+    _deepARService.onError = (error) {
+      debugPrint('DeepAR error: $error');
+    };
+  }
+
+  Future<void> _initializeDeepAR() async {
+    // Request permissions
+    final cameraStatus = await Permission.camera.request();
+    final micStatus = await Permission.microphone.request();
+    await Permission.storage.request();
+
+    if (!cameraStatus.isGranted || !micStatus.isGranted) {
+      _showMessage('Camera or microphone permission denied');
+      return;
     }
+
+    // Initialize DeepAR with license key
+    final initialized = await _deepARService.initialize(
+      '4982a37c51bb6b7001492bc4765f7d7dac91a6ae234f4049a127e71851c37d4d90ce8bdff2fa06ae',
+    );
+
+    if (initialized) {
+      // Start camera
+      final cameraInfo = await _deepARService.startCamera();
+      if (cameraInfo != null && mounted) {
+        setState(() {
+          _textureId = cameraInfo.textureId;
+          _cameraAspectRatio = cameraInfo.aspectRatio;
+        });
+      }
+    } else {
+      _showMessage('Failed to initialize DeepAR');
+    }
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), duration: const Duration(seconds: 2)),
+    );
   }
 
   @override
   void dispose() {
-    _controller?.dispose();
+    _deepARService.dispose();
     super.dispose();
   }
 
@@ -104,7 +157,9 @@ class _CameraScreenState extends State<CameraScreen> {
     setState(() {
       _selectedFilterIndex = index;
     });
-    debugPrint('Filter changed to: ${filter.name}');
+    // Switch DeepAR effect
+    _deepARService.switchEffect(filter.effectFile);
+    debugPrint('Filter changed to: ${filter.name} (${filter.effectFile})');
   }
 
   void _onIntensityChanged(double value) {
@@ -114,118 +169,48 @@ class _CameraScreenState extends State<CameraScreen> {
     debugPrint('Intensity: ${(value * 100).toInt()}%');
   }
 
-  Future<void> _onFlashChanged(bool isOn) async {
-    if (_controller == null || !_controller!.value.isInitialized) return;
-
-    try {
-      await _controller!.setFlashMode(isOn ? FlashMode.torch : FlashMode.off);
-      setState(() {
-        _isFlashOn = isOn;
-      });
-      debugPrint('Flash: ${isOn ? "ON" : "OFF"}');
-    } catch (e) {
-      debugPrint('Error toggling flash: $e');
-    }
-  }
-
   void _onCapture() {
+    _deepARService.takeScreenshot();
     debugPrint('📸 Photo captured!');
-    // TODO: Implement photo capture
   }
 
   Future<void> _onRecordingStart() async {
-    if (_controller == null || !_controller!.value.isInitialized) return;
-    if (_controller!.value.isRecordingVideo) return;
-
-    try {
-      await _controller!.startVideoRecording();
-      setState(() {
-        _isRecording = true;
-      });
-      debugPrint('🔴 Recording started');
-    } catch (e) {
-      debugPrint('Error starting recording: $e');
-    }
+    if (_isRecording) return;
+    await _deepARService.startRecording();
+    debugPrint('🔴 Recording started');
   }
 
   Future<void> _onRecordingStop() async {
-    if (_controller == null || !_controller!.value.isRecordingVideo) return;
-
-    try {
-      setState(() {
-        _isRecording = false;
-      });
-
-      final XFile videoFile = await _controller!.stopVideoRecording();
-      debugPrint('⏹️ Recording stopped');
-
-      await _saveVideoFile(videoFile);
-    } catch (e) {
-      debugPrint('Error stopping recording: $e');
-    }
-  }
-
-  Future<void> _saveVideoFile(XFile sourceFile) async {
-    final String folderName =
-        widget.videoOutputFolderName ?? 'morphy_recordings';
-    Directory? baseDir;
-
-    // Determine saving directory
-    if (Platform.isAndroid) {
-      // Try Movies first, then Download
-      baseDir = Directory('/storage/emulated/0/Movies');
-      if (!await baseDir.exists()) {
-        baseDir = Directory('/storage/emulated/0/Download');
-      }
-    } else {
-      baseDir = await getApplicationDocumentsDirectory();
-    }
-
-    final Directory finalDir;
-    Directory tempDir = Directory('${baseDir.path}/$folderName');
-
-    bool dirExists = false;
-    try {
-      if (!await tempDir.exists()) {
-        await tempDir.create(recursive: true);
-      }
-      dirExists = true;
-    } catch (e) {
-      debugPrint('Error creating public recording dir: $e');
-    }
-
-    if (dirExists) {
-      finalDir = tempDir;
-    } else {
-      final internalDir = await getApplicationDocumentsDirectory();
-      finalDir = Directory('${internalDir.path}/$folderName');
-      if (!await finalDir.exists()) {
-        await finalDir.create(recursive: true);
-      }
-    }
-
-    final String timestamp = DateTime.now().millisecondsSinceEpoch.toString();
-    final String fileName = 'MORPH_$timestamp.mp4';
-    final String filePath = '${finalDir.path}/$fileName';
-
-    try {
-      await sourceFile.saveTo(filePath);
-      debugPrint('Video saved to: $filePath');
-
+    if (!_isRecording) return;
+    final path = await _deepARService.stopRecording();
+    if (path != null) {
+      debugPrint('⏹️ Recording stopped: $path');
       if (mounted) {
-        // Show success message
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Saved video to $fileName'),
+            content: Text('Video saved: ${path.split('/').last}'),
             backgroundColor: Colors.green,
             behavior: SnackBarBehavior.floating,
             duration: const Duration(seconds: 3),
           ),
         );
       }
-    } catch (e) {
-      debugPrint('Error saving video file: $e');
     }
+  }
+
+  Future<void> _cycleCamera() async {
+    // Stop recording if in progress
+    if (_isRecording) {
+      await _deepARService.stopRecording();
+      setState(() {
+        _isRecording = false;
+      });
+    }
+
+    await _deepARService.switchCamera();
+    setState(() {
+      _isFrontCamera = !_isFrontCamera;
+    });
   }
 
   @override
@@ -235,7 +220,7 @@ class _CameraScreenState extends State<CameraScreen> {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          // Background: Camera preview placeholder
+          // Background: DeepAR Camera preview
           _buildCameraPreview(),
 
           // Gradient overlay for better UI visibility
@@ -251,7 +236,7 @@ class _CameraScreenState extends State<CameraScreen> {
                 // Spacer to push everything down
                 const Spacer(),
 
-                // Bottom Controls (Stack for overlapping elements)
+                // Bottom Controls
                 _buildBottomControls(),
               ],
             ),
@@ -264,70 +249,35 @@ class _CameraScreenState extends State<CameraScreen> {
     );
   }
 
-  Future<void> _captureLastFrame() async {
-    try {
-      final boundary =
-          _camKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
-      if (boundary == null) return;
-
-      final image = await boundary.toImage(pixelRatio: 1.0);
-      setState(() {
-        _lastFrame = image;
-      });
-    } catch (e) {
-      debugPrint('Error capturing last frame: $e');
-    }
-  }
-
-  /// Camera preview placeholder (gradient background)
-  /// Camera preview placeholder (gradient background)
+  /// DeepAR Camera preview
   Widget _buildCameraPreview() {
-    Widget child;
-    Key key;
-
-    // Prioritize Frozen Frame (Screen Capture) if available to avoid Red Screen
-    // This allows us to dispose the controller safely while showing a static image.
-    if (_lastFrame != null) {
-      key = const ValueKey('frozen');
-      child = SizedBox.expand(
-        child: RawImage(image: _lastFrame, fit: BoxFit.cover),
-      );
-    } else if (_isCameraInitialized &&
-        _controller != null &&
-        _controller!.value.isInitialized) {
-      // Live Camera
-      key = const ValueKey('live');
-      child = RepaintBoundary(
-        key: _camKey,
-        child: SizedBox.expand(child: CameraPreview(_controller!)),
-      );
-    } else {
-      // Loading State
-      key = const ValueKey('loading');
-      child = Container(
-        color: Colors.black,
-        child: const Center(
-          child: CircularProgressIndicator(
-            color: Colors.white24,
-            strokeWidth: 2,
+    if (_textureId != null) {
+      return SizedBox.expand(
+        child: FittedBox(
+          fit: BoxFit.cover,
+          child: SizedBox(
+            width: _cameraAspectRatio > 1 ? _cameraAspectRatio * 1000 : 1000,
+            height: _cameraAspectRatio > 1 ? 1000 : 1000 / _cameraAspectRatio,
+            child: Texture(textureId: _textureId!),
           ),
         ),
       );
+    } else {
+      return Container(
+        color: Colors.black,
+        child: Center(
+          child: _isDeepARInitialized
+              ? const Text(
+                  'Initializing camera...',
+                  style: TextStyle(color: Colors.white),
+                )
+              : const CircularProgressIndicator(
+                  color: Colors.white24,
+                  strokeWidth: 2,
+                ),
+        ),
+      );
     }
-
-    return SizedBox.expand(
-      child: AnimatedSwitcher(
-        // If we have a frozen frame, switch instantly to it (duration 0)
-        // so we can dispose the controller immediately without 'Red Screen' error.
-        // When switching back to live ('frozen' -> 'live'), animate slowly (fade).
-        duration: (_lastFrame != null && key == const ValueKey('frozen'))
-            ? Duration.zero
-            : const Duration(milliseconds: 600),
-        switchInCurve: Curves.easeInOut,
-        switchOutCurve: Curves.easeInOut,
-        child: KeyedSubtree(key: key, child: child),
-      ),
-    );
   }
 
   /// Gradient overlay for better visibility of UI elements
@@ -341,13 +291,8 @@ class _CameraScreenState extends State<CameraScreen> {
     );
   }
 
-  /// Top bar with gender indicator and flash toggle
+  /// Top bar with gender indicator and camera switch
   Widget _buildTopBar() {
-    // Flash is only available on back camera usually
-    final bool isFlashAvailable =
-        _controller != null &&
-        _controller!.description.lensDirection == CameraLensDirection.back;
-
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Row(
@@ -367,141 +312,26 @@ class _CameraScreenState extends State<CameraScreen> {
             ),
           ),
 
-          // Right side actions
-          Row(
-            children: [
-              // Camera Switcher
-              IconButton(
-                onPressed: _cycleCamera,
-                icon: const Icon(
-                  Icons.cameraswitch_outlined,
-                  color: Colors.white,
-                ),
-                tooltip: 'Switch Camera',
-              ),
-              const SizedBox(width: 8),
-              // Flash toggle
-              FlashToggle(
-                initialState: _isFlashOn,
-                onChanged: isFlashAvailable ? _onFlashChanged : null,
-                isEnabled: isFlashAvailable,
-              ),
-            ],
+          // Camera switch button (right)
+          IconButton(
+            onPressed: _cycleCamera,
+            icon: const Icon(Icons.cameraswitch_outlined, color: Colors.white),
+            tooltip: 'Switch Camera',
           ),
         ],
       ),
     );
   }
 
-  Future<void> _cycleCamera() async {
-    if (_cameras == null || _cameras!.length < 2) return;
-
-    // 1. Check if recording is in progress and stop it safely
-    if (_isRecording &&
-        _controller != null &&
-        _controller!.value.isRecordingVideo) {
-      try {
-        final XFile videoFile = await _controller!.stopVideoRecording();
-
-        // Non-blocking save: we don't await this to speed up UI,
-        // OR we should await if we want to ensure it's saved before controller dies?
-        // Disposing controller usually doesn't affect the file (XFile is temp path).
-        // So we can trigger save async.
-        // However, user said "recorder continue but not saved".
-        // This implies we need to explicitly stop it here.
-        _saveVideoFile(videoFile);
-
-        setState(() {
-          _isRecording = false;
-        });
-        debugPrint('Recording auto-stopped due to camera switch');
-      } catch (e) {
-        debugPrint('Error stopping recording during switch: $e');
-      }
-    }
-
-    // 2. Capture current frame to display while switching
-    await _captureLastFrame();
-
-    final lensDirection = _controller?.description.lensDirection;
-    CameraDescription newCamera;
-
-    if (lensDirection == CameraLensDirection.back) {
-      newCamera = _cameras!.firstWhere(
-        (c) => c.lensDirection == CameraLensDirection.front,
-        orElse: () => _cameras![0],
-      );
-    } else {
-      newCamera = _cameras!.firstWhere(
-        (c) => c.lensDirection == CameraLensDirection.back,
-        orElse: () => _cameras![0],
-      );
-    }
-
-    setState(() {
-      _isCameraInitialized = false;
-    });
-
-    if (_controller != null) {
-      // Explicitly turn off flash to prevent it from getting stuck on
-      // if we are switching away from back camera
-      if (_controller!.value.isInitialized &&
-          _controller!.description.lensDirection == CameraLensDirection.back) {
-        try {
-          await _controller!.setFlashMode(FlashMode.off);
-        } catch (_) {}
-      }
-      await _controller!.dispose();
-    }
-
-    // Initialize new controller
-    _controller = CameraController(
-      newCamera,
-      ResolutionPreset.high,
-      enableAudio: true,
-      imageFormatGroup: ImageFormatGroup.jpeg,
-    );
-
-    try {
-      await _controller!.initialize();
-      // Reset flash state potentially or keep it off
-      await _controller!.setFlashMode(FlashMode.off);
-      if (mounted) {
-        setState(() {
-          _isFlashOn = false;
-          _isCameraInitialized = true;
-          // Clear the frozen frame so we see the live camera again
-          // Delay slightly to let the stream start
-        });
-        Future.delayed(const Duration(milliseconds: 100), () {
-          if (mounted) {
-            setState(() {
-              _lastFrame = null;
-            });
-          }
-        });
-      }
-    } catch (e) {
-      debugPrint('Error switching camera: $e');
-    }
-  }
-
   /// Bottom controls with filter selector, intensity slider and capture button
   Widget _buildBottomControls() {
-    // Height calculation:
-    // Capture button size (approx 90) + padding (24) = 114
-    // Slider expanded height (220) needs to fit
     return SizedBox(
       height: 300,
       child: Stack(
         alignment: Alignment.bottomCenter,
         clipBehavior: Clip.none,
         children: [
-          // 1. Filter Selector (at bottom, same line as capture button)
-          // Adjusted bottom padding to align center of filters with center of capture button
-          // Capture button center is at bottom + 24 + 45 (half height) = 69px from bottom
-          // Filter item height is approx 80px (54 circle + text)
-          // We want center of circle (27px from top of item) to align with 69px
+          // 1. Filter Selector
           Positioned(
             bottom: 30,
             left: 0,
@@ -512,7 +342,7 @@ class _CameraScreenState extends State<CameraScreen> {
             ),
           ),
 
-          // 2. Capture Button (Centered at bottom)
+          // 2. Capture Button
           Positioned(
             bottom: 48,
             child: CaptureButton(
@@ -523,8 +353,7 @@ class _CameraScreenState extends State<CameraScreen> {
             ),
           ),
 
-          // 3. Intensity Slider (Centered above capture button)
-          // Positioned higher up so the arrow sits above the button
+          // 3. Intensity Slider
           Positioned(
             bottom: 138,
             left: 0,
