@@ -171,24 +171,24 @@ class DeepARPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, AREventLis
     
     private fun startCamera(result: Result) {
         activity?.let { act ->
-            // Create texture for rendering
+            // Create texture for rendering - use PORTRAIT dimensions (1080x1920)
             textureEntry = textureRegistry.createSurfaceTexture()
             val surfaceTexture = textureEntry!!.surfaceTexture()
-            surfaceTexture.setDefaultBufferSize(1920, 1080)
+            surfaceTexture.setDefaultBufferSize(1080, 1920)
             
-            // Set DeepAR to render to this surface
-            deepAR?.setRenderSurface(android.view.Surface(surfaceTexture), 1920, 1080)
+            // Set DeepAR to render to this surface in PORTRAIT mode
+            deepAR?.setRenderSurface(android.view.Surface(surfaceTexture), 1080, 1920)
             
             cameraProviderFuture = ProcessCameraProvider.getInstance(act)
             cameraProviderFuture?.addListener({
                 try {
                     val cameraProvider = cameraProviderFuture?.get()
                     cameraProvider?.let { bindCamera(it) }
-                    // Return texture ID and dimensions to Flutter
+                    // Return texture ID and PORTRAIT dimensions to Flutter
                     result.success(mapOf(
                         "textureId" to textureEntry!!.id().toInt(),
-                        "width" to 1920,
-                        "height" to 1080
+                        "width" to 1080,
+                        "height" to 1920
                     ))
                 } catch (e: ExecutionException) {
                     result.error("CAMERA_ERROR", e.message, null)
@@ -200,12 +200,13 @@ class DeepARPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, AREventLis
     }
     
     private fun bindCamera(cameraProvider: ProcessCameraProvider) {
-        val cameraResolution = Size(1920, 1080)
+        // Request portrait-oriented resolution (will be rotated by device)
+        val cameraResolution = Size(1080, 1920)
         val cameraSelector = CameraSelector.Builder()
             .requireLensFacing(lensFacing)
             .build()
         
-        // Initialize buffers
+        // Initialize buffers for camera frames
         buffers = Array(NUMBER_OF_BUFFERS) {
             ByteBuffer.allocateDirect(cameraResolution.width * cameraResolution.height * 4).apply {
                 order(ByteOrder.nativeOrder())
@@ -217,6 +218,7 @@ class DeepARPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, AREventLis
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
             .setTargetResolution(cameraResolution)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setTargetRotation(android.view.Surface.ROTATION_0) // Portrait orientation
             .build()
         
         imageAnalysis.setAnalyzer(ContextCompat.getMainExecutor(activity!!)) { image ->
@@ -292,6 +294,7 @@ class DeepARPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, AREventLis
     
     /**
      * Convert ImageProxy (RGBA_8888) to Bitmap - must be called before image.close()
+     * Applies rotation and mirroring for correct face orientation during classification
      */
     private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap? {
         return try {
@@ -300,7 +303,7 @@ class DeepARPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, AREventLis
             val bytes = ByteArray(buffer.remaining())
             buffer.get(bytes)
             
-            val bitmap = Bitmap.createBitmap(
+            var bitmap = Bitmap.createBitmap(
                 imageProxy.width,
                 imageProxy.height,
                 Bitmap.Config.ARGB_8888
@@ -308,7 +311,40 @@ class DeepARPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, AREventLis
             
             val pixelBuffer = ByteBuffer.wrap(bytes)
             bitmap.copyPixelsFromBuffer(pixelBuffer)
-            bitmap
+            
+            // Apply rotation and mirroring for correct face orientation
+            val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+            val needsTransform = rotationDegrees != 0 || lensFacing == CameraSelector.LENS_FACING_FRONT
+            
+            if (needsTransform) {
+                val matrix = android.graphics.Matrix()
+                
+                // Apply rotation to correct for camera sensor orientation
+                if (rotationDegrees != 0) {
+                    matrix.postRotate(rotationDegrees.toFloat())
+                }
+                
+                // Mirror for front camera (selfie mode)
+                if (lensFacing == CameraSelector.LENS_FACING_FRONT) {
+                    // Mirror horizontally after rotation
+                    val newWidth = if (rotationDegrees == 90 || rotationDegrees == 270) bitmap.height else bitmap.width
+                    matrix.postScale(-1f, 1f, newWidth / 2f, 0f)
+                }
+                
+                val transformedBitmap = Bitmap.createBitmap(
+                    bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true
+                )
+                
+                // Recycle original if a new bitmap was created
+                if (transformedBitmap != bitmap) {
+                    bitmap.recycle()
+                }
+                
+                android.util.Log.d("DeepARPlugin", "Bitmap transformed: rotation=$rotationDegrees, front=${ lensFacing == CameraSelector.LENS_FACING_FRONT}, size=${transformedBitmap.width}x${transformedBitmap.height}")
+                transformedBitmap
+            } else {
+                bitmap
+            }
         } catch (e: Exception) {
             android.util.Log.e("DeepARPlugin", "Failed to convert ImageProxy to Bitmap: ${e.message}")
             null
@@ -333,7 +369,12 @@ class DeepARPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, AREventLis
     }
     
     private fun getFilterPath(filterName: String): String? {
-        return if (filterName == "none") null else "file:///android_asset/flutter_assets/assets/effects/$filterName"
+        // Handle 'none' for no effect
+        if (filterName == "none") return null
+        
+        // The filterName already includes the subdirectory (e.g., "male/beard.deepar")
+        // just prepend the base assets path
+        return "file:///android_asset/flutter_assets/assets/effects/$filterName"
     }
     
     private fun switchEffect(effectName: String?, result: Result) {

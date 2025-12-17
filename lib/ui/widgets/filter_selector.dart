@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../theme/colors.dart';
+import '../../models/gender_effects.dart';
 
 /// Filter data model with DeepAR effect support
 class FilterItem {
@@ -9,6 +10,7 @@ class FilterItem {
   final List<Color> colors;
 
   /// DeepAR effect filename (e.g., 'MakeupLook.deepar') or 'none' for no effect
+  /// For gender-specific effects, includes folder: 'male/effect.deepar'
   final String effectFile;
 
   const FilterItem({
@@ -19,158 +21,97 @@ class FilterItem {
   });
 }
 
-/// DeepAR filters from assets/effects folder
-const List<FilterItem> sampleFilters = [
-  FilterItem(
-    id: 'original',
-    name: 'Original',
-    colors: [Color(0xFF333333), Color(0xFF555555)],
-    effectFile: 'none',
-  ),
-  FilterItem(
-    id: 'test',
-    name: 'Test',
-    colors: [Color(0xFF9370DB), Color(0xFF00CED1)],
-    effectFile: 'test_euro_guy.deepar',
-  ),
-  FilterItem(
-    id: 'makeup',
-    name: 'Makeup',
-    colors: [Color(0xFFFF6B9D), Color(0xFFC44569)],
-    effectFile: 'MakeupLook.deepar',
-  ),
-  FilterItem(
-    id: 'viking',
-    name: 'Viking',
-    colors: [Color(0xFF8B4513), Color(0xFFCD853F)],
-    effectFile: 'viking_helmet.deepar',
-  ),
-  FilterItem(
-    id: 'stallone',
-    name: 'Stallone',
-    colors: [Color(0xFFD4A373), Color(0xFFE9EDC9)],
-    effectFile: 'Stallone.deepar',
-  ),
-  FilterItem(
-    id: 'flower',
-    name: 'Flower',
-    colors: [Color(0xFFFF69B4), Color(0xFFFFB6C1)],
-    effectFile: 'flower_face.deepar',
-  ),
-  FilterItem(
-    id: 'fire',
-    name: 'Fire',
-    colors: [Color(0xFFFF4500), Color(0xFFFF6347)],
-    effectFile: 'Fire_Effect.deepar',
-  ),
-  FilterItem(
-    id: 'neon',
-    name: 'Neon',
-    colors: [Color(0xFF00F5D4), Color(0xFFF15BB5)],
-    effectFile: 'Neon_Devil_Horns.deepar',
-  ),
-  FilterItem(
-    id: 'humanoid',
-    name: 'Humanoid',
-    colors: [Color(0xFF2D3142), Color(0xFF4F5D75)],
-    effectFile: 'Humanoid.deepar',
-  ),
-  FilterItem(
-    id: 'hope',
-    name: 'Hope',
-    colors: [Color(0xFFFFD700), Color(0xFFB8860B)],
-    effectFile: 'Hope.deepar',
-  ),
-  FilterItem(
-    id: 'elephant',
-    name: 'Elephant',
-    colors: [Color(0xFF808080), Color(0xFFA9A9A9)],
-    effectFile: 'Elephant_Trunk.deepar',
-  ),
-  FilterItem(
-    id: 'snail',
-    name: 'Snail',
-    colors: [Color(0xFF8B7355), Color(0xFFD2B48C)],
-    effectFile: 'Snail.deepar',
-  ),
-  FilterItem(
-    id: 'vendetta',
-    name: 'Vendetta',
-    colors: [Color(0xFF1A1A1A), Color(0xFF8B0000)],
-    effectFile: 'Vendetta_Mask.deepar',
-  ),
-  FilterItem(
-    id: 'pingpong',
-    name: 'Ping Pong',
-    colors: [Color(0xFFFF6600), Color(0xFFFFCC00)],
-    effectFile: 'Ping_Pong.deepar',
-  ),
-  FilterItem(
-    id: 'hearts',
-    name: 'Hearts',
-    colors: [Color(0xFFFF1493), Color(0xFFFF69B4)],
-    effectFile: 'Pixel_Hearts.deepar',
-  ),
-  FilterItem(
-    id: 'burning',
-    name: 'Burning',
-    colors: [Color(0xFFFF4500), Color(0xFF8B0000)],
-    effectFile: 'burning_effect.deepar',
-  ),
-  FilterItem(
-    id: 'emotions',
-    name: 'Emotions',
-    colors: [Color(0xFFFFD700), Color(0xFF32CD32)],
-    effectFile: 'Emotions_Exaggerator.deepar',
-  ),
-  FilterItem(
-    id: 'meter',
-    name: 'Meter',
-    colors: [Color(0xFF00CED1), Color(0xFF20B2AA)],
-    effectFile: 'Emotion_Meter.deepar',
-  ),
-  FilterItem(
-    id: 'split',
-    name: 'Split View',
-    colors: [Color(0xFF9370DB), Color(0xFF00CED1)],
-    effectFile: 'Split_View_Look.deepar',
-  ),
-  FilterItem(
-    id: 'galaxy',
-    name: 'Galaxy',
-    colors: [Color(0xFF191970), Color(0xFF4B0082)],
-    effectFile: 'galaxy_background.deepar',
-  ),
-];
-
 /// Instagram-style horizontal filter selector with snap-to-center
+/// Now supports dynamic filter lists that can change based on detected gender
 class FilterSelector extends StatefulWidget {
   final Function(FilterItem filter, int index)? onFilterChanged;
   final int initialIndex;
+
+  /// Optional external filter list - if not provided, uses unknown gender filters
+  final List<FilterItem>? filters;
 
   const FilterSelector({
     super.key,
     this.onFilterChanged,
     this.initialIndex = 0,
+    this.filters,
   });
 
   @override
-  State<FilterSelector> createState() => _FilterSelectorState();
+  State<FilterSelector> createState() => FilterSelectorState();
 }
 
-class _FilterSelectorState extends State<FilterSelector> {
+class FilterSelectorState extends State<FilterSelector> {
   late PageController _pageController;
   late int _selectedIndex;
+  late List<FilterItem> _currentFilters;
   static const double _viewportFraction = 0.18;
 
   @override
   void initState() {
     super.initState();
     _selectedIndex = widget.initialIndex;
+    _currentFilters =
+        widget.filters ??
+        GenderEffectsService.instance.getUnknownGenderFilters();
+
+    // If no effects loaded yet, show at least the default
+    if (_currentFilters.isEmpty) {
+      _currentFilters = [GenderEffectsService.defaultFilter];
+    }
+
     _pageController = PageController(
       viewportFraction: _viewportFraction,
-      initialPage: _selectedIndex,
+      initialPage: _selectedIndex.clamp(0, _currentFilters.length - 1),
     );
+  }
+
+  @override
+  void didUpdateWidget(FilterSelector oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Update filters if external list changed
+    if (widget.filters != oldWidget.filters && widget.filters != null) {
+      _updateFilters(widget.filters!);
+    }
+  }
+
+  /// Update the filter list (called when gender changes)
+  void updateFilters(List<FilterItem> newFilters) {
+    _updateFilters(newFilters);
+  }
+
+  void _updateFilters(List<FilterItem> newFilters) {
+    if (newFilters.isEmpty) return;
+
+    setState(() {
+      final currentEffectFile =
+          _currentFilters.isNotEmpty && _selectedIndex < _currentFilters.length
+          ? _currentFilters[_selectedIndex].effectFile
+          : 'none';
+
+      _currentFilters = newFilters;
+
+      // Try to find the same effect in the new list
+      int newIndex = newFilters.indexWhere(
+        (f) => f.effectFile == currentEffectFile,
+      );
+      if (newIndex < 0) {
+        newIndex = 0; // Default to first (Original) if not found
+      }
+
+      _selectedIndex = newIndex;
+    });
+
+    // Animate to the new position
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_pageController.hasClients) {
+        _pageController.animateToPage(
+          _selectedIndex,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOutCubic,
+        );
+      }
+    });
   }
 
   @override
@@ -180,14 +121,19 @@ class _FilterSelectorState extends State<FilterSelector> {
   }
 
   void _onPageChanged(int index) {
-    if (_selectedIndex != index) {
+    if (_selectedIndex != index && index < _currentFilters.length) {
       setState(() {
         _selectedIndex = index;
       });
       HapticFeedback.selectionClick();
-      widget.onFilterChanged?.call(sampleFilters[index], index);
+      widget.onFilterChanged?.call(_currentFilters[index], index);
     }
   }
+
+  /// Get current filter
+  FilterItem get currentFilter => _selectedIndex < _currentFilters.length
+      ? _currentFilters[_selectedIndex]
+      : GenderEffectsService.defaultFilter;
 
   @override
   Widget build(BuildContext context) {
@@ -201,10 +147,10 @@ class _FilterSelectorState extends State<FilterSelector> {
             controller: _pageController,
             onPageChanged: _onPageChanged,
             physics: const BouncingScrollPhysics(),
-            itemCount: sampleFilters.length,
+            itemCount: _currentFilters.length,
             itemBuilder: (context, index) {
               return _FilterCircle(
-                filter: sampleFilters[index],
+                filter: _currentFilters[index],
                 isSelected: index == _selectedIndex,
                 onTap: () {
                   _pageController.animateToPage(

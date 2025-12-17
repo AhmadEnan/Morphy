@@ -95,3 +95,6 @@ flutter:
 
   assets:
     - assets/effects/
+    - assets/effects/male/
+    - assets/effects/female/
+    - assets/effects/both/

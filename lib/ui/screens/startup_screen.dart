@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:morphy/services/asset_sync_service.dart';
 import 'package:morphy/ui/screens/camera_screen.dart';
+import 'package:morphy/models/gender_effects.dart';
 
 class StartupScreen extends StatefulWidget {
   final String manifestUrl;
@@ -95,8 +96,15 @@ class _StartupScreenState extends State<StartupScreen> {
         });
       }
     }
+
+    // Initialize gender effects service (loads effects from asset folders)
+    setState(() {
+      _status = 'Loading effects...';
+    });
+    await GenderEffectsService.instance.initialize();
+
     // Give the user a brief moment to see the sync results message
-    await Future.delayed(const Duration(seconds: 2));
+    await Future.delayed(const Duration(seconds: 1));
   }
 
   @override

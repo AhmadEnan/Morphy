@@ -204,22 +204,63 @@ class GenderClassifier(private val context: Context) {
     
     /**
      * Crop face region from bitmap with padding
+     * Creates a SQUARE crop to prevent aspect ratio distortion when resizing to 224x224
      */
     private fun cropFace(bitmap: Bitmap, boundingBox: Rect): Bitmap? {
         return try {
             // Add 20% padding around the face
             val padding = (boundingBox.width() * 0.2f).toInt()
             
-            val left = maxOf(0, boundingBox.left - padding)
-            val top = maxOf(0, boundingBox.top - padding)
-            val right = minOf(bitmap.width, boundingBox.right + padding)
-            val bottom = minOf(bitmap.height, boundingBox.bottom + padding)
+            var left = maxOf(0, boundingBox.left - padding)
+            var top = maxOf(0, boundingBox.top - padding)
+            var right = minOf(bitmap.width, boundingBox.right + padding)
+            var bottom = minOf(bitmap.height, boundingBox.bottom + padding)
             
-            val width = right - left
-            val height = bottom - top
+            var width = right - left
+            var height = bottom - top
             
             if (width <= 0 || height <= 0) return null
             
+            // Make it square by expanding the smaller dimension (or shrinking if at edge)
+            if (width != height) {
+                val maxDim = maxOf(width, height)
+                val centerX = left + width / 2
+                val centerY = top + height / 2
+                
+                // Try to create a square crop centered on face
+                var newLeft = centerX - maxDim / 2
+                var newTop = centerY - maxDim / 2
+                var newRight = centerX + maxDim / 2
+                var newBottom = centerY + maxDim / 2
+                
+                // Adjust if we go out of bounds
+                if (newLeft < 0) {
+                    newRight -= newLeft
+                    newLeft = 0
+                }
+                if (newTop < 0) {
+                    newBottom -= newTop
+                    newTop = 0
+                }
+                if (newRight > bitmap.width) {
+                    newLeft -= (newRight - bitmap.width)
+                    newRight = bitmap.width
+                }
+                if (newBottom > bitmap.height) {
+                    newTop -= (newBottom - bitmap.height)
+                    newBottom = bitmap.height
+                }
+                
+                // Final bounds check
+                left = maxOf(0, newLeft)
+                top = maxOf(0, newTop)
+                right = minOf(bitmap.width, newRight)
+                bottom = minOf(bitmap.height, newBottom)
+                width = right - left
+                height = bottom - top
+            }
+            
+            Log.d(TAG, "Cropping face: ${width}x${height} (square: ${width == height})")
             Bitmap.createBitmap(bitmap, left, top, width, height)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to crop face: ${e.message}")

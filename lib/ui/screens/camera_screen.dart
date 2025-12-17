@@ -7,8 +7,9 @@ import '../widgets/capture_button.dart';
 import '../widgets/gender_indicator.dart';
 import '../widgets/intensity_slider.dart';
 import '../../services/deepar_service.dart';
+import '../../models/gender_effects.dart';
 
-/// Main camera screen with DeepAR integration
+/// Main camera screen with DeepAR integration and gender-based effects
 class CameraScreen extends StatefulWidget {
   final bool syncFailed;
   final String? videoOutputFolderName;
@@ -32,6 +33,13 @@ class _CameraScreenState extends State<CameraScreen> {
   // Gender classification
   Gender _detectedGender = Gender.unknown;
   double _genderConfidence = 0.0;
+  String _lastGenderString = 'unknown'; // Track gender to detect changes
+
+  // Temporal smoothing for gender detection
+  int _consecutiveGenderCount = 0;
+  String _pendingGender = 'unknown';
+  static const int _requiredConsecutiveCount =
+      3; // Require 3 consistent results
 
   // DeepAR
   late DeepARService _deepARService;
@@ -40,12 +48,15 @@ class _CameraScreenState extends State<CameraScreen> {
   bool _isDeepARInitialized = false;
   bool _isFrontCamera = true;
 
+  // Gender-based filters
+  List<FilterItem> _currentFilters = [];
+  final GlobalKey<FilterSelectorState> _filterSelectorKey = GlobalKey();
+
   @override
   void initState() {
     super.initState();
     _deepARService = DeepARService();
-    _setupDeepARCallbacks();
-    _initializeDeepAR();
+    _initializeEffectsAndDeepAR();
 
     if (widget.syncFailed) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -59,6 +70,20 @@ class _CameraScreenState extends State<CameraScreen> {
         );
       });
     }
+  }
+
+  Future<void> _initializeEffectsAndDeepAR() async {
+    // Initialize the gender effects service first
+    await GenderEffectsService.instance.initialize();
+
+    // Set initial filters (unknown gender = both only)
+    setState(() {
+      _currentFilters = GenderEffectsService.instance.getUnknownGenderFilters();
+    });
+
+    // Now setup DeepAR
+    _setupDeepARCallbacks();
+    await _initializeDeepAR();
   }
 
   void _setupDeepARCallbacks() {
@@ -110,18 +135,63 @@ class _CameraScreenState extends State<CameraScreen> {
       debugPrint('DeepAR error: $error');
     };
 
-    // Gender classification callback
+    // Gender classification callback with temporal smoothing
     _deepARService.onGenderClassified = (result) {
       if (mounted && result.confidence > 0.6) {
+        final newGender = result.isMale ? 'male' : 'female';
+
+        // Temporal smoothing: count consecutive same-gender results
+        if (newGender == _pendingGender) {
+          _consecutiveGenderCount++;
+        } else {
+          _pendingGender = newGender;
+          _consecutiveGenderCount = 1;
+        }
+
+        // Always update confidence display
         setState(() {
-          _detectedGender = result.isMale ? Gender.male : Gender.female;
           _genderConfidence = result.confidence;
         });
+
+        // Only switch gender after N consecutive same results
+        if (_consecutiveGenderCount >= _requiredConsecutiveCount &&
+            newGender != _lastGenderString) {
+          _lastGenderString = newGender;
+          setState(() {
+            _detectedGender = result.isMale ? Gender.male : Gender.female;
+          });
+          _updateFiltersForGender(newGender);
+          debugPrint(
+            'Gender switched to: $newGender (after $_consecutiveGenderCount consistent results)',
+          );
+        }
+
         debugPrint(
-          'Gender: ${result.gender} (${(result.confidence * 100).toInt()}%)',
+          'Gender: ${result.gender} (${(result.confidence * 100).toInt()}%) - consecutive: $_consecutiveGenderCount',
         );
       }
     };
+  }
+
+  /// Update the filter list when gender changes
+  void _updateFiltersForGender(String gender) {
+    final newFilters = GenderEffectsService.instance.getFiltersForGender(
+      gender,
+    );
+
+    if (newFilters.isEmpty) return;
+
+    setState(() {
+      _currentFilters = newFilters;
+      _selectedFilterIndex = 0; // Reset to default filter
+    });
+
+    // Update the filter selector widget
+    _filterSelectorKey.currentState?.updateFilters(newFilters);
+
+    debugPrint(
+      'Switched to $gender filter list (${newFilters.length} filters)',
+    );
   }
 
   Future<void> _initializeDeepAR() async {
@@ -168,7 +238,9 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   // Get current filter
-  FilterItem get _currentFilter => sampleFilters[_selectedFilterIndex];
+  FilterItem get _currentFilter => _selectedFilterIndex < _currentFilters.length
+      ? _currentFilters[_selectedFilterIndex]
+      : GenderEffectsService.defaultFilter;
 
   void _onFilterChanged(FilterItem filter, int index) {
     setState(() {
@@ -273,6 +345,7 @@ class _CameraScreenState extends State<CameraScreen> {
         child: FittedBox(
           fit: BoxFit.cover,
           child: SizedBox(
+            // Use aspect ratio from native side (now portrait: 1080x1920)
             width: _cameraAspectRatio > 1 ? _cameraAspectRatio * 1000 : 1000,
             height: _cameraAspectRatio > 1 ? 1000 : 1000 / _cameraAspectRatio,
             child: Texture(textureId: _textureId!),
@@ -351,14 +424,16 @@ class _CameraScreenState extends State<CameraScreen> {
         alignment: Alignment.bottomCenter,
         clipBehavior: Clip.none,
         children: [
-          // 1. Filter Selector
+          // 1. Filter Selector - now uses dynamic gender-based filters
           Positioned(
             bottom: 30,
             left: 0,
             right: 0,
             child: FilterSelector(
+              key: _filterSelectorKey,
               initialIndex: _selectedFilterIndex,
               onFilterChanged: _onFilterChanged,
+              filters: _currentFilters,
             ),
           ),
 
