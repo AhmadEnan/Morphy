@@ -46,7 +46,10 @@ class DeepARPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, AREventLis
     private var isDeepARInitialized = false
     private var recording = false
     private var videoFileName: File? = null
-    private var currentEffect = 0
+    
+    // Flash/torch state
+    private var isFlashEnabled = false
+    private var camera: Camera? = null
     
     // Gender classification
     private var genderClassifier: GenderClassifier? = null
@@ -54,28 +57,6 @@ class DeepARPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, AREventLis
     private var frameCount = 0
     private val CLASSIFY_EVERY_N_FRAMES = 10
     private val classificationExecutor = Executors.newSingleThreadExecutor()
-    
-    private val effects = listOf(
-        "none",
-        "viking_helmet.deepar",
-        "MakeupLook.deepar",
-        "Split_View_Look.deepar",
-        "Emotions_Exaggerator.deepar",
-        "Emotion_Meter.deepar",
-        "Stallone.deepar",
-        "flower_face.deepar",
-        "galaxy_background.deepar",
-        "Humanoid.deepar",
-        "Neon_Devil_Horns.deepar",
-        "Ping_Pong.deepar",
-        "Pixel_Hearts.deepar",
-        "Snail.deepar",
-        "Hope.deepar",
-        "Vendetta_Mask.deepar",
-        "Fire_Effect.deepar",
-        "burning_effect.deepar",
-        "Elephant_Trunk.deepar"
-    )
     
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         context = binding.applicationContext
@@ -127,12 +108,8 @@ class DeepARPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, AREventLis
                 val effectName = call.argument<String>("effectName")
                 switchEffect(effectName, result)
             }
-            "nextEffect" -> {
-                nextEffect(result)
-            }
-            "previousEffect" -> {
-                previousEffect(result)
-            }
+            // nextEffect and previousEffect removed - all effect switching
+            // is now handled dynamically from Flutter via switchEffect
             "takeScreenshot" -> {
                 takeScreenshot(result)
             }
@@ -149,6 +126,10 @@ class DeepARPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, AREventLis
             "setClassificationEnabled" -> {
                 classificationEnabled = call.argument<Boolean>("enabled") ?: true
                 result.success(true)
+            }
+            "setFlashEnabled" -> {
+                val enabled = call.argument<Boolean>("enabled") ?: false
+                setFlashEnabled(enabled, result)
             }
             "changeParameterFloat" -> {
                 val gameObject = call.argument<String>("gameObject") ?: ""
@@ -243,11 +224,14 @@ class DeepARPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, AREventLis
         }
         
         cameraProvider.unbindAll()
-        cameraProvider.bindToLifecycle(
+        camera = cameraProvider.bindToLifecycle(
             activity as LifecycleOwner,
             cameraSelector,
             imageAnalysis
         )
+        
+        // Reset flash state when camera is bound
+        isFlashEnabled = false
     }
     
     private fun processImage(image: ImageProxy) {
@@ -375,6 +359,9 @@ class DeepARPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, AREventLis
             CameraSelector.LENS_FACING_FRONT
         }
         
+        // Turn off flash when switching cameras
+        isFlashEnabled = false
+        
         try {
             val cameraProvider = cameraProviderFuture?.get()
             cameraProvider?.unbindAll()
@@ -385,33 +372,83 @@ class DeepARPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, AREventLis
         }
     }
     
+    private fun setFlashEnabled(enabled: Boolean, result: Result) {
+        try {
+            // Flash only works with back camera
+            if (lensFacing == CameraSelector.LENS_FACING_FRONT) {
+                android.util.Log.d("DeepARPlugin", "Flash not available on front camera")
+                result.success(false)
+                return
+            }
+            
+            camera?.let { cam ->
+                if (cam.cameraInfo.hasFlashUnit()) {
+                    cam.cameraControl.enableTorch(enabled)
+                    isFlashEnabled = enabled
+                    android.util.Log.d("DeepARPlugin", "Flash ${if (enabled) "enabled" else "disabled"}")
+                    result.success(true)
+                } else {
+                    android.util.Log.d("DeepARPlugin", "Device does not have flash unit")
+                    result.success(false)
+                }
+            } ?: run {
+                android.util.Log.e("DeepARPlugin", "Camera not available")
+                result.success(false)
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("DeepARPlugin", "setFlashEnabled error: ${e.message}")
+            result.error("FLASH_ERROR", e.message, null)
+        }
+    }
+    
     private fun getFilterPath(filterName: String): String? {
         // Handle 'none' for no effect
-        if (filterName == "none") return null
+        if (filterName == "none") {
+            android.util.Log.d("DeepARPlugin", "getFilterPath: 'none' - clearing effect")
+            return null
+        }
         
-        // The filterName already includes the subdirectory (e.g., "male/beard.deepar")
-        // just prepend the base assets path
-        return "file:///android_asset/flutter_assets/assets/effects/$filterName"
+        android.util.Log.d("DeepARPlugin", "getFilterPath input: $filterName")
+        
+        // Check if this is already an absolute path (from synced assets)
+        // Absolute paths start with / or contain :// (like file://)
+        if (filterName.startsWith("/") || filterName.contains("://")) {
+            // For absolute paths, use file:// protocol if not already present
+            val result = if (filterName.startsWith("file://")) {
+                filterName
+            } else {
+                "file://$filterName"
+            }
+            android.util.Log.d("DeepARPlugin", "getFilterPath absolute result: $result")
+            
+            // Verify file exists
+            val filePath = result.removePrefix("file://")
+            val file = java.io.File(filePath)
+            android.util.Log.d("DeepARPlugin", "File exists: ${file.exists()}, readable: ${file.canRead()}, size: ${if(file.exists()) file.length() else 0}")
+            
+            return result
+        }
+        
+        // For relative paths (bundled assets), prepend the flutter assets path
+        // The filterName includes the subdirectory (e.g., "male/beard.deepar")
+        val result = "file:///android_asset/flutter_assets/assets/effects/$filterName"
+        android.util.Log.d("DeepARPlugin", "getFilterPath bundled result: $result")
+        return result
     }
     
     private fun switchEffect(effectName: String?, result: Result) {
+        android.util.Log.d("DeepARPlugin", "switchEffect called with: $effectName")
         effectName?.let {
-            deepAR?.switchEffect("effect", getFilterPath(it))
+            val path = getFilterPath(it)
+            android.util.Log.d("DeepARPlugin", "switchEffect path: $path")
+            deepAR?.switchEffect("effect", path)
             result.success(true)
         } ?: result.error("INVALID_EFFECT", "Effect name is null", null)
     }
     
-    private fun nextEffect(result: Result) {
-        currentEffect = (currentEffect + 1) % effects.size
-        deepAR?.switchEffect("effect", getFilterPath(effects[currentEffect]))
-        result.success(effects[currentEffect])
-    }
-    
-    private fun previousEffect(result: Result) {
-        currentEffect = (currentEffect - 1 + effects.size) % effects.size
-        deepAR?.switchEffect("effect", getFilterPath(effects[currentEffect]))
-        result.success(effects[currentEffect])
-    }
+    // nextEffect and previousEffect methods removed
+    // All effect management is now handled dynamically from Flutter
+    // via GenderEffectsService which loads effects from assets/effects/
     
     /**
      * Change a float parameter on a DeepAR effect
@@ -588,7 +625,8 @@ class DeepARPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, AREventLis
     
     override fun initialized() {
         isDeepARInitialized = true
-        deepAR?.switchEffect("effect", getFilterPath(effects[currentEffect]))
+        // Don't apply any default effect - Flutter will handle effect selection
+        // based on gender classification via GenderEffectsService
         activity?.runOnUiThread {
             channel.invokeMethod("onInitialized", null)
         }

@@ -134,9 +134,11 @@ class DeepARService {
   /// Switch to a specific effect
   Future<bool> switchEffect(String effectName) async {
     try {
+      print('DeepARService.switchEffect: Sending effectName = "$effectName"');
       final result = await _channel.invokeMethod('switchEffect', {
         'effectName': effectName,
       });
+      print('DeepARService.switchEffect: Result = $result');
       return result as bool;
     } catch (e) {
       print('Switch effect error: $e');
@@ -173,6 +175,19 @@ class DeepARService {
       return result as bool;
     } catch (e) {
       print('Take screenshot error: $e');
+      return false;
+    }
+  }
+
+  /// Toggle flash/torch on or off (only works with back camera)
+  Future<bool> setFlashEnabled(bool enabled) async {
+    try {
+      final result = await _channel.invokeMethod('setFlashEnabled', {
+        'enabled': enabled,
+      });
+      return result as bool? ?? false;
+    } catch (e) {
+      print('Set flash error: $e');
       return false;
     }
   }
