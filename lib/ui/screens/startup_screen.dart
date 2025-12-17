@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:morphy/services/asset_sync_service.dart';
 import 'package:morphy/ui/screens/camera_screen.dart';
+import 'package:morphy/models/gender_effects.dart';
 import 'dart:math' as math;
 
 class StartupScreen extends StatefulWidget {
@@ -84,6 +85,18 @@ class _StartupScreenState extends State<StartupScreen>
   Future<void> _startAppSequence() async {
     await _requestPermissions();
     await _syncAssets();
+
+    // Load gender-based effects from asset folders
+    setState(() {
+      _status = 'Loading effects...';
+      _progress = 0.95;
+    });
+    await GenderEffectsService.instance.initialize(
+      assetFolderName: widget.assetFolderName,
+    );
+    setState(() {
+      _progress = 1.0;
+    });
 
     // Show file log briefly before navigating
     if (_syncResult != null && _syncResult!.totalFiles > 0) {

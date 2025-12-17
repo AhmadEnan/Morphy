@@ -134,9 +134,11 @@ class DeepARService {
   /// Switch to a specific effect
   Future<bool> switchEffect(String effectName) async {
     try {
+      print('DeepARService.switchEffect: Sending effectName = "$effectName"');
       final result = await _channel.invokeMethod('switchEffect', {
         'effectName': effectName,
       });
+      print('DeepARService.switchEffect: Result = $result');
       return result as bool;
     } catch (e) {
       print('Switch effect error: $e');

@@ -1,11 +1,13 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 import '../ui/widgets/filter_selector.dart';
 
 /// Gender type enum for effect filtering
 enum EffectGender { male, female, both, unknown }
 
-/// Service for dynamically loading gender-specific effects from assets
+/// Service for dynamically loading gender-specific effects from synced assets
 class GenderEffectsService {
   static GenderEffectsService? _instance;
   static GenderEffectsService get instance =>
@@ -19,6 +21,7 @@ class GenderEffectsService {
   List<FilterItem> _bothEffects = [];
 
   bool _isInitialized = false;
+  String? _syncedAssetsPath;
 
   /// Default "no effect" filter item
   static const FilterItem defaultFilter = FilterItem(
@@ -50,26 +53,57 @@ class GenderEffectsService {
     [Color(0xFF4169E1), Color(0xFF1E90FF)], // Royal Blue
   ];
 
-  /// Initialize the service - loads effects from asset folders
-  Future<void> initialize() async {
+  /// Initialize the service - loads effects from synced assets folder
+  /// [assetFolderName]: The folder name where synced assets are stored (e.g., 'morphy_assets')
+  Future<void> initialize({String? assetFolderName}) async {
     if (_isInitialized) return;
 
     try {
-      // Load effects from each folder using the new AssetManifest API
-      final assetManifest = await AssetManifest.loadFromAssetBundle(rootBundle);
-      final allAssets = assetManifest.listAssets();
+      // Try to load from synced assets folder first
+      if (assetFolderName != null) {
+        final baseDir = await getApplicationDocumentsDirectory();
+        // The synced folder structure is: {assetFolderName}/male/, female/, both/
+        // (matching the GitHub repo structure)
+        final syncedDir = Directory('${baseDir.path}/$assetFolderName');
 
-      debugPrint(
-        'GenderEffectsService: Found ${allAssets.length} total assets',
-      );
+        if (await syncedDir.exists()) {
+          _syncedAssetsPath = syncedDir.path;
+          debugPrint(
+            'GenderEffectsService: Loading from synced folder: $_syncedAssetsPath',
+          );
 
-      // Filter and load effects from each folder
-      _maleEffects = _loadEffectsFromAssetList(allAssets, 'male');
-      _femaleEffects = _loadEffectsFromAssetList(allAssets, 'female');
-      _bothEffects = _loadEffectsFromAssetList(allAssets, 'both');
+          _maleEffects = await _loadEffectsFromDirectory(
+            '$_syncedAssetsPath/male',
+            'male',
+          );
+          _femaleEffects = await _loadEffectsFromDirectory(
+            '$_syncedAssetsPath/female',
+            'female',
+          );
+          _bothEffects = await _loadEffectsFromDirectory(
+            '$_syncedAssetsPath/both',
+            'both',
+          );
+
+          final totalSynced =
+              _maleEffects.length + _femaleEffects.length + _bothEffects.length;
+          if (totalSynced > 0) {
+            _isInitialized = true;
+            debugPrint('GenderEffectsService initialized from synced assets:');
+            debugPrint('  Male effects: ${_maleEffects.length}');
+            debugPrint('  Female effects: ${_femaleEffects.length}');
+            debugPrint('  Both effects: ${_bothEffects.length}');
+            return;
+          }
+        }
+      }
+
+      // Fallback: Load from bundled assets
+      debugPrint('GenderEffectsService: Falling back to bundled assets');
+      await _loadFromBundledAssets();
 
       _isInitialized = true;
-      debugPrint('GenderEffectsService initialized:');
+      debugPrint('GenderEffectsService initialized from bundled assets:');
       debugPrint('  Male effects: ${_maleEffects.length}');
       debugPrint('  Female effects: ${_femaleEffects.length}');
       debugPrint('  Both effects: ${_bothEffects.length}');
@@ -80,7 +114,65 @@ class GenderEffectsService {
     }
   }
 
-  /// Load effects from asset list for a specific folder
+  /// Load effects from a directory (synced assets)
+  Future<List<FilterItem>> _loadEffectsFromDirectory(
+    String dirPath,
+    String folder,
+  ) async {
+    final List<FilterItem> effects = [];
+    final dir = Directory(dirPath);
+
+    if (!await dir.exists()) {
+      debugPrint('  Directory does not exist: $dirPath');
+      return effects;
+    }
+
+    int colorIndex = 0;
+    final entities = dir.listSync();
+
+    for (final entity in entities) {
+      if (entity is File && entity.path.endsWith('.deepar')) {
+        final fileName = entity.uri.pathSegments.last;
+        final effectName = _formatEffectName(fileName);
+        final effectId = fileName
+            .replaceAll('.deepar', '')
+            .toLowerCase()
+            .replaceAll(' ', '_');
+
+        // Store the FULL ABSOLUTE PATH for synced effects
+        effects.add(
+          FilterItem(
+            id: effectId,
+            name: effectName,
+            colors: _colorPalettes[colorIndex % _colorPalettes.length],
+            effectFile: entity.path, // Full absolute path
+          ),
+        );
+
+        debugPrint('  Found synced effect: $folder/$fileName');
+        debugPrint('    Full path: ${entity.path}');
+        colorIndex++;
+      }
+    }
+
+    return effects;
+  }
+
+  /// Fallback: Load effects from bundled Flutter assets
+  Future<void> _loadFromBundledAssets() async {
+    final assetManifest = await AssetManifest.loadFromAssetBundle(rootBundle);
+    final allAssets = assetManifest.listAssets();
+
+    debugPrint(
+      'GenderEffectsService: Found ${allAssets.length} total bundled assets',
+    );
+
+    _maleEffects = _loadEffectsFromAssetList(allAssets, 'male');
+    _femaleEffects = _loadEffectsFromAssetList(allAssets, 'female');
+    _bothEffects = _loadEffectsFromAssetList(allAssets, 'both');
+  }
+
+  /// Load effects from asset list for a specific folder (bundled assets)
   List<FilterItem> _loadEffectsFromAssetList(
     List<String> allAssets,
     String folder,
@@ -105,6 +197,7 @@ class GenderEffectsService {
             .toLowerCase()
             .replaceAll(' ', '_');
 
+        // For bundled assets, store relative path (folder/filename)
         effects.add(
           FilterItem(
             id: effectId,
@@ -114,7 +207,7 @@ class GenderEffectsService {
           ),
         );
 
-        debugPrint('  Found effect: $folder/$fileName');
+        debugPrint('  Found bundled effect: $folder/$fileName');
         colorIndex++;
       }
     }
@@ -190,4 +283,7 @@ class GenderEffectsService {
 
   /// Check if service is initialized
   bool get isInitialized => _isInitialized;
+
+  /// Check if using synced assets (vs bundled)
+  bool get usingSyncedAssets => _syncedAssetsPath != null;
 }
