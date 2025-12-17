@@ -23,9 +23,10 @@ class MorphyApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: AppTheme.darkTheme,
       home: const StartupScreen(
+        // Direct folder URL - syncs the effects folder structure from GitHub
         manifestUrl:
-            'https://github.com/Ziad-Ashraf-Mostafa/ImageMorphy/blob/main/assets_manifest.json',
-        assetFolderName: 'asset_test',
+            'https://github.com/AhmadEnan/Morphy/tree/main/assets/effects/',
+        assetFolderName: 'morphy_assets',
         videoOutputFolderName: 'morphy_recordings',
       ),
     );
