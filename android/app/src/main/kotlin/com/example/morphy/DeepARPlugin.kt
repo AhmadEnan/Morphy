@@ -411,26 +411,28 @@ class DeepARPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, AREventLis
         android.util.Log.d("DeepARPlugin", "getFilterPath input: $filterName")
         
         // Check if this is already an absolute path (from synced assets)
-        // Absolute paths start with / or contain :// (like file://)
-        if (filterName.startsWith("/") || filterName.contains("://")) {
-            // For absolute paths, use file:// protocol if not already present
-            val result = if (filterName.startsWith("file://")) {
-                filterName
-            } else {
-                "file://$filterName"
+        if (filterName.startsWith("/")) {
+            // External file - use raw absolute path
+            val file = java.io.File(filterName)
+            android.util.Log.d("DeepARPlugin", "External file check - exists: ${file.exists()}, readable: ${file.canRead()}, size: ${if(file.exists()) file.length() else 0}")
+            
+            if (!file.exists()) {
+                android.util.Log.e("DeepARPlugin", "External file does not exist: $filterName")
+                return null
             }
-            android.util.Log.d("DeepARPlugin", "getFilterPath absolute result: $result")
             
-            // Verify file exists
-            val filePath = result.removePrefix("file://")
-            val file = java.io.File(filePath)
-            android.util.Log.d("DeepARPlugin", "File exists: ${file.exists()}, readable: ${file.canRead()}, size: ${if(file.exists()) file.length() else 0}")
-            
-            return result
+            // Try raw path first (DeepAR might accept it directly)
+            android.util.Log.d("DeepARPlugin", "getFilterPath using raw path: $filterName")
+            return filterName
+        }
+        
+        // Check if it's already a URI
+        if (filterName.contains("://")) {
+            android.util.Log.d("DeepARPlugin", "getFilterPath already URI: $filterName")
+            return filterName
         }
         
         // For relative paths (bundled assets), prepend the flutter assets path
-        // The filterName includes the subdirectory (e.g., "male/beard.deepar")
         val result = "file:///android_asset/flutter_assets/assets/effects/$filterName"
         android.util.Log.d("DeepARPlugin", "getFilterPath bundled result: $result")
         return result
@@ -441,7 +443,38 @@ class DeepARPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, AREventLis
         effectName?.let {
             val path = getFilterPath(it)
             android.util.Log.d("DeepARPlugin", "switchEffect path: $path")
-            deepAR?.switchEffect("effect", path)
+            
+            if (path == null) {
+                // Clear effect
+                deepAR?.switchEffect("effect", null as String?)
+                result.success(true)
+                return
+            }
+            
+            // Check if this is an external file (absolute path without android_asset)
+            if (path.startsWith("/") && !path.contains("android_asset")) {
+                val file = java.io.File(path)
+                android.util.Log.d("DeepARPlugin", "switchEffect external file:")
+                android.util.Log.d("DeepARPlugin", "  - path: $path")
+                android.util.Log.d("DeepARPlugin", "  - exists: ${file.exists()}")
+                android.util.Log.d("DeepARPlugin", "  - canRead: ${file.canRead()}")
+                android.util.Log.d("DeepARPlugin", "  - length: ${if(file.exists()) file.length() else 0}")
+                
+                if (!file.exists() || !file.canRead()) {
+                    android.util.Log.e("DeepARPlugin", "Cannot read external file!")
+                    result.error("FILE_ERROR", "Cannot read effect file", null)
+                    return
+                }
+                
+                // For external files, pass the raw path directly (no file:// prefix)
+                android.util.Log.d("DeepARPlugin", "  - calling switchEffect with raw path")
+                deepAR?.switchEffect("effect", path)
+            } else {
+                // Bundled asset - use the URI format
+                android.util.Log.d("DeepARPlugin", "  - calling switchEffect with bundled path: $path")
+                deepAR?.switchEffect("effect", path)
+            }
+            
             result.success(true)
         } ?: result.error("INVALID_EFFECT", "Effect name is null", null)
     }
@@ -652,6 +685,7 @@ class DeepARPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, AREventLis
     }
     
     override fun error(errorType: ARErrorType?, errorMessage: String?) {
+        android.util.Log.e("DeepARPlugin", "DeepAR ERROR: type=$errorType, message=$errorMessage")
         activity?.runOnUiThread {
             channel.invokeMethod("onError", mapOf(
                 "errorType" to errorType?.toString(),
@@ -661,6 +695,7 @@ class DeepARPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, AREventLis
     }
     
     override fun effectSwitched(effectName: String?) {
+        android.util.Log.d("DeepARPlugin", "DeepAR effectSwitched callback: $effectName")
         activity?.runOnUiThread {
             channel.invokeMethod("onEffectSwitched", mapOf("effectName" to effectName))
         }

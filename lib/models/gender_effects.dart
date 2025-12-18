@@ -23,6 +23,16 @@ class GenderEffectsService {
   bool _isInitialized = false;
   String? _syncedAssetsPath;
 
+  /// Reset the service to allow re-initialization (call before initialize to force refresh)
+  void reset() {
+    _isInitialized = false;
+    _maleEffects = [];
+    _femaleEffects = [];
+    _bothEffects = [];
+    _syncedAssetsPath = null;
+    debugPrint('🔄 GenderEffectsService reset');
+  }
+
   /// Default "no effect" filter item
   static const FilterItem defaultFilter = FilterItem(
     id: 'original',
@@ -53,64 +63,83 @@ class GenderEffectsService {
     [Color(0xFF4169E1), Color(0xFF1E90FF)], // Royal Blue
   ];
 
-  /// Initialize the service - loads effects from synced assets folder
+  /// Initialize the service - loads effects from BOTH bundled AND synced assets
   /// [assetFolderName]: The folder name where synced assets are stored (e.g., 'morphy_assets')
   Future<void> initialize({String? assetFolderName}) async {
     if (_isInitialized) return;
 
     try {
-      // Try to load from synced assets folder first
+      debugPrint('═══════════════════════════════════════════');
+      debugPrint('🎭 GENDER EFFECTS SERVICE INITIALIZING');
+      debugPrint('═══════════════════════════════════════════');
+
+      // STEP 1: Always load bundled assets first (they're already in the app)
+      debugPrint('📦 Loading bundled assets...');
+      await _loadFromBundledAssets();
+      
+      final bundledMale = _maleEffects.length;
+      final bundledFemale = _femaleEffects.length;
+      final bundledBoth = _bothEffects.length;
+      debugPrint('  Bundled: $bundledMale male, $bundledFemale female, $bundledBoth both');
+
+      // STEP 2: Load additional synced assets (downloaded from GitHub)
       if (assetFolderName != null) {
         final baseDir = await getApplicationDocumentsDirectory();
-        // The synced folder structure is: {assetFolderName}/male/, female/, both/
-        // (directly inside the asset folder, synced from GitHub effects folder)
         final syncedDir = Directory('${baseDir.path}/$assetFolderName');
+
+        debugPrint('📥 Checking synced folder: ${syncedDir.path}');
+        debugPrint('   Exists: ${await syncedDir.exists()}');
+        
+        // List contents
+        if (await syncedDir.exists()) {
+          final contents = syncedDir.listSync();
+          debugPrint('   Contents: ${contents.length} items');
+          for (final item in contents) {
+            debugPrint('     - ${item.path}');
+          }
+        }
 
         if (await syncedDir.exists()) {
           _syncedAssetsPath = syncedDir.path;
-          debugPrint(
-            'GenderEffectsService: Loading from synced folder: $_syncedAssetsPath',
-          );
 
-          _maleEffects = await _loadEffectsFromDirectory(
-            '$_syncedAssetsPath/male',
-            'male',
-          );
-          _femaleEffects = await _loadEffectsFromDirectory(
-            '$_syncedAssetsPath/female',
-            'female',
-          );
-          _bothEffects = await _loadEffectsFromDirectory(
-            '$_syncedAssetsPath/both',
-            'both',
-          );
+          // Load synced effects and MERGE with bundled (avoiding duplicates)
+          final syncedMale = await _loadEffectsFromDirectory('$_syncedAssetsPath/male', 'male');
+          final syncedFemale = await _loadEffectsFromDirectory('$_syncedAssetsPath/female', 'female');
+          final syncedBoth = await _loadEffectsFromDirectory('$_syncedAssetsPath/both', 'both');
 
-          final totalSynced =
-              _maleEffects.length + _femaleEffects.length + _bothEffects.length;
-          if (totalSynced > 0) {
-            _isInitialized = true;
-            debugPrint('GenderEffectsService initialized from synced assets:');
-            debugPrint('  Male effects: ${_maleEffects.length}');
-            debugPrint('  Female effects: ${_femaleEffects.length}');
-            debugPrint('  Both effects: ${_bothEffects.length}');
-            return;
-          }
+          debugPrint('  Synced: ${syncedMale.length} male, ${syncedFemale.length} female, ${syncedBoth.length} both');
+
+          // Merge: Add synced effects that aren't already in bundled
+          _mergeEffects(_maleEffects, syncedMale);
+          _mergeEffects(_femaleEffects, syncedFemale);
+          _mergeEffects(_bothEffects, syncedBoth);
+        } else {
+          debugPrint('  Synced folder does not exist yet');
         }
       }
 
-      // Fallback: Load from bundled assets
-      debugPrint('GenderEffectsService: Falling back to bundled assets');
-      await _loadFromBundledAssets();
-
       _isInitialized = true;
-      debugPrint('GenderEffectsService initialized from bundled assets:');
-      debugPrint('  Male effects: ${_maleEffects.length}');
-      debugPrint('  Female effects: ${_femaleEffects.length}');
-      debugPrint('  Both effects: ${_bothEffects.length}');
+      
+      debugPrint('═══════════════════════════════════════════');
+      debugPrint('✅ EFFECTS LOADED');
+      debugPrint('  Total male: ${_maleEffects.length}');
+      debugPrint('  Total female: ${_femaleEffects.length}');
+      debugPrint('  Total both: ${_bothEffects.length}');
+      debugPrint('═══════════════════════════════════════════');
     } catch (e) {
-      debugPrint('Error initializing GenderEffectsService: $e');
-      _isInitialized =
-          true; // Mark as initialized even on error to prevent retries
+      debugPrint('❌ Error initializing GenderEffectsService: $e');
+      _isInitialized = true;
+    }
+  }
+
+  /// Merge synced effects into existing list, avoiding duplicates by ID
+  void _mergeEffects(List<FilterItem> existing, List<FilterItem> toAdd) {
+    final existingIds = existing.map((e) => e.id).toSet();
+    for (final effect in toAdd) {
+      if (!existingIds.contains(effect.id)) {
+        existing.add(effect);
+        debugPrint('  + Added synced effect: ${effect.name}');
+      }
     }
   }
 
@@ -122,18 +151,22 @@ class GenderEffectsService {
     final List<FilterItem> effects = [];
     final dir = Directory(dirPath);
 
-    debugPrint('  Loading effects from: $dirPath');
+    debugPrint('📂 Loading synced effects from: $dirPath');
+    debugPrint('   Directory exists: ${await dir.exists()}');
 
     if (!await dir.exists()) {
-      debugPrint('  ❌ Directory does not exist: $dirPath');
+      debugPrint('   ⚠️ Directory does not exist, returning empty list');
       return effects;
     }
 
     int colorIndex = 0;
     final entities = dir.listSync();
-    debugPrint('  Found ${entities.length} entities in $folder/');
+    debugPrint('   Found ${entities.length} entities');
 
     for (final entity in entities) {
+      debugPrint('   Checking: ${entity.path}');
+      debugPrint('      Is File: ${entity is File}');
+      debugPrint('      Ends with .deepar: ${entity.path.endsWith('.deepar')}');
       if (entity is File && entity.path.endsWith('.deepar')) {
         final fileName = entity.uri.pathSegments.last;
         final effectName = _formatEffectName(fileName);
@@ -141,6 +174,18 @@ class GenderEffectsService {
             .replaceAll('.deepar', '')
             .toLowerCase()
             .replaceAll(' ', '_');
+
+        // Verify file size (small files might be LFS pointers or corrupted)
+        final fileSize = await entity.length();
+        debugPrint('      ✓ Adding synced effect: $effectName (id: $effectId)');
+        debugPrint('        Full path: ${entity.path}');
+        debugPrint('        File size: $fileSize bytes');
+        
+        if (fileSize < 1000) {
+          debugPrint('        ⚠️ WARNING: File very small, might be invalid!');
+          // Skip invalid files
+          continue;
+        }
 
         // Store the FULL ABSOLUTE PATH for synced effects
         effects.add(
@@ -151,24 +196,27 @@ class GenderEffectsService {
             effectFile: entity.path, // Full absolute path
           ),
         );
-
-        debugPrint('  Found synced effect: $folder/$fileName');
-        debugPrint('    Full path: ${entity.path}');
         colorIndex++;
       }
     }
 
+    debugPrint('   📂 Loaded ${effects.length} effects from $folder');
     return effects;
   }
 
-  /// Fallback: Load effects from bundled Flutter assets
+  /// Load effects from bundled Flutter assets
   Future<void> _loadFromBundledAssets() async {
     final assetManifest = await AssetManifest.loadFromAssetBundle(rootBundle);
     final allAssets = assetManifest.listAssets();
 
-    debugPrint(
-      'GenderEffectsService: Found ${allAssets.length} total bundled assets',
-    );
+    debugPrint('  Found ${allAssets.length} total bundled assets');
+    
+    // Debug: show all .deepar assets found
+    final deeparAssets = allAssets.where((a) => a.endsWith('.deepar')).toList();
+    debugPrint('  Found ${deeparAssets.length} .deepar files:');
+    for (final asset in deeparAssets) {
+      debugPrint('    - $asset');
+    }
 
     _maleEffects = _loadEffectsFromAssetList(allAssets, 'male');
     _femaleEffects = _loadEffectsFromAssetList(allAssets, 'female');
@@ -246,18 +294,23 @@ class GenderEffectsService {
   }
 
   /// Get filters for unknown/undetected gender (default + both effects only)
+  /// Before gender is detected, show only gender-neutral "both" filters
   List<FilterItem> getUnknownGenderFilters() {
     return [defaultFilter, ..._bothEffects];
   }
 
   /// Get filters based on gender string from classification
   List<FilterItem> getFiltersForGender(String gender) {
+    debugPrint('getFiltersForGender: $gender');
     switch (gender.toLowerCase()) {
       case 'male':
+        debugPrint('  Returning ${getMaleFilters().length} male filters');
         return getMaleFilters();
       case 'female':
+        debugPrint('  Returning ${getFemaleFilters().length} female filters');
         return getFemaleFilters();
       default:
+        debugPrint('  Returning ${getUnknownGenderFilters().length} unknown filters');
         return getUnknownGenderFilters();
     }
   }

@@ -298,8 +298,13 @@ class DeepARService {
     final attempts = [
       // Standard intensity parameters
       {
-        'gameObject': 'FilterNode',
-        'component': 'MeshRenderer',
+        'gameObject': 'object',
+        'component': 'u_intensity',
+        'parameter': 'u_intensity',
+      },
+      {
+        'gameObject': 'Object',
+        'component': 'u_intensity',
         'parameter': 'u_intensity',
       },
       {

@@ -74,12 +74,23 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   Future<void> _initializeEffectsAndDeepAR() async {
-    // Initialize the gender effects service first
-    await GenderEffectsService.instance.initialize();
+    // Reset and re-initialize the gender effects service
+    // This ensures we pick up any newly synced assets
+    GenderEffectsService.instance.reset();
+    
+    // Initialize the gender effects service with the asset folder name
+    // This loads both bundled assets AND synced assets from GitHub
+    await GenderEffectsService.instance.initialize(
+      assetFolderName: 'morphy_assets',
+    );
 
     // Set initial filters (unknown gender = both only)
     setState(() {
       _currentFilters = GenderEffectsService.instance.getUnknownGenderFilters();
+      debugPrint('Initial filters set: ${_currentFilters.length} filters');
+      for (final f in _currentFilters) {
+        debugPrint('  - ${f.name}: ${f.effectFile}');
+      }
     });
 
     // Now setup DeepAR
@@ -247,6 +258,14 @@ class _CameraScreenState extends State<CameraScreen> {
     setState(() {
       _selectedFilterIndex = index;
     });
+    
+    debugPrint('═══════════════════════════════════════════');
+    debugPrint('🎭 FILTER CHANGED');
+    debugPrint('  Name: ${filter.name}');
+    debugPrint('  Effect file: ${filter.effectFile}');
+    debugPrint('  Is absolute path: ${filter.effectFile.startsWith("/")}');
+    debugPrint('═══════════════════════════════════════════');
+    
     // Switch DeepAR effect
     _deepARService.switchEffect(filter.effectFile);
 
@@ -254,8 +273,6 @@ class _CameraScreenState extends State<CameraScreen> {
     if (_isDeepARInitialized) {
       _deepARService.setFilterIntensity(_filterIntensity);
     }
-
-    debugPrint('Filter changed to: ${filter.name} (${filter.effectFile})');
   }
 
   void _onIntensityChanged(double value) {

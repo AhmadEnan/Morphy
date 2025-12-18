@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show rootBundle, AssetManifest;
 
 /// Result of a sync operation with details about downloaded files
 class SyncResult {
@@ -22,7 +23,6 @@ class SyncResult {
       downloadedFiles.length + existingFiles.length + failedFiles.length;
   int get successCount => downloadedFiles.length + existingFiles.length;
 
-  /// Merge two SyncResults
   SyncResult merge(SyncResult other) {
     return SyncResult(
       downloadedFiles: [...downloadedFiles, ...other.downloadedFiles],
@@ -33,33 +33,48 @@ class SyncResult {
   }
 }
 
-/// Callback for sync progress updates
 typedef SyncProgressCallback =
     void Function(String status, double progress, String? currentFile);
 
 /// Asset Sync Service - Syncs files from a GitHub folder to local storage
-///
-/// Supports Git LFS files - automatically detects LFS pointers and fetches
-/// the actual binary files from GitHub's media server.
-///
-/// Usage:
-/// ```dart
-/// final result = await AssetSyncService().syncAssets(
-///   targetUrl: 'https://github.com/user/repo/tree/main/effects',
-///   localFolderName: 'my_assets',
-/// );
-/// ```
 class AssetSyncService {
-  // GitHub repo info extracted from URL (needed for LFS resolution)
   String? _owner;
   String? _repo;
   String? _branch;
+  String? _localBasePath;
+  Set<String> _bundledAssetNames = {};
 
-  /// Syncs local files with a GitHub folder.
-  ///
-  /// [targetUrl]: GitHub folder URL (e.g., https://github.com/user/repo/tree/main/effects)
-  /// [localFolderName]: The name of the local folder to sync to (e.g., 'morphy_assets')
-  /// [onProgress]: Optional callback for progress updates.
+  /// Get list of bundled .deepar asset NAMES (not paths) from the APK
+  Future<Set<String>> _getBundledAssetNames() async {
+    final bundledNames = <String>{};
+    try {
+      // Use AssetManifest.loadFromAssetBundle (the correct modern API)
+      final assetManifest = await AssetManifest.loadFromAssetBundle(rootBundle);
+      final allAssets = assetManifest.listAssets();
+      
+      debugPrint('📦 Scanning bundled assets in APK (${allAssets.length} total assets)...');
+      for (final assetPath in allAssets) {
+        if (assetPath.contains('assets/effects/') && assetPath.endsWith('.deepar')) {
+          // Extract just the filename
+          final fileName = assetPath.split('/').last;
+          bundledNames.add(fileName);
+          debugPrint('   📦 Bundled: $fileName (from $assetPath)');
+        }
+      }
+      debugPrint('📦 Total bundled .deepar files: ${bundledNames.length}');
+    } catch (e) {
+      debugPrint('⚠️ Could not read asset manifest: $e');
+    }
+    
+    // If manifest reading failed or returned nothing, the bundled check won't work
+    // This is fine - we'll just download the files (they might already exist locally)
+    if (bundledNames.isEmpty) {
+      debugPrint('⚠️ No bundled assets found in manifest - bundled check disabled');
+    }
+    
+    return bundledNames;
+  }
+
   Future<SyncResult> syncAssets({
     required String targetUrl,
     required String localFolderName,
@@ -73,9 +88,9 @@ class AssetSyncService {
 
     onProgress?.call('Connecting to GitHub...', 0.0, null);
 
-    // Setup Local Directory
     final baseDir = await getApplicationDocumentsDirectory();
     final localDir = Directory('${baseDir.path}/$localFolderName');
+    _localBasePath = localDir.path;
 
     if (!await localDir.exists()) {
       await localDir.create(recursive: true);
@@ -83,34 +98,26 @@ class AssetSyncService {
 
     debugPrint('📁 Local directory: ${localDir.path}');
 
-    // Debug: List existing files
-    if (await localDir.exists()) {
-      final existingEntities = localDir.listSync(recursive: true);
-      debugPrint('📄 Existing files in local directory:');
-      for (final e in existingEntities) {
-        if (e is File) {
-          final size = await e.length();
-          debugPrint('   - ${e.path} ($size bytes)');
-        } else if (e is Directory) {
-          debugPrint('   📂 ${e.path}/');
-        }
-      }
+    // Get list of bundled asset names (files already in the APK)
+    _bundledAssetNames = await _getBundledAssetNames();
+    debugPrint('📦 Found ${_bundledAssetNames.length} bundled assets in APK:');
+    for (final name in _bundledAssetNames) {
+      debugPrint('   📦 $name');
     }
 
-    // Sync from GitHub folder
-    final result = await _syncGitHubFolder(targetUrl, localDir, onProgress);
-
-    // Debug: List files after sync
-    debugPrint('📄 Files AFTER sync:');
-    if (await localDir.exists()) {
-      final entities = localDir.listSync(recursive: true);
-      for (final e in entities) {
-        if (e is File) {
-          final size = await e.length();
-          debugPrint('   ✓ ${e.path} ($size bytes)');
-        }
-      }
+    // List ALL existing .deepar files BEFORE sync
+    final existingFiles = await _listAllDeeparFiles(localDir);
+    debugPrint('📋 Found ${existingFiles.length} existing .deepar files:');
+    for (final f in existingFiles) {
+      debugPrint('   ✓ $f');
     }
+
+    final result = await _syncGitHubFolder(
+      targetUrl,
+      localDir,
+      existingFiles,
+      onProgress,
+    );
 
     debugPrint('═══════════════════════════════════════════');
     debugPrint('✅ SYNC COMPLETE');
@@ -122,19 +129,34 @@ class AssetSyncService {
     return result;
   }
 
-  /// Get the base directory path for assets
+  /// List all .deepar files recursively
+  Future<Set<String>> _listAllDeeparFiles(Directory dir) async {
+    final files = <String>{};
+    if (!await dir.exists()) return files;
+
+    await for (final entity in dir.list(recursive: true)) {
+      if (entity is File && entity.path.endsWith('.deepar')) {
+        final size = await entity.length();
+        if (size > 1000) {
+          // Only count files > 1KB as valid
+          files.add(entity.path);
+        }
+      }
+    }
+    return files;
+  }
+
   static Future<String> getAssetsBasePath(String localFolderName) async {
     final baseDir = await getApplicationDocumentsDirectory();
     return '${baseDir.path}/$localFolderName';
   }
 
-  /// Sync from a GitHub folder URL
   Future<SyncResult> _syncGitHubFolder(
     String url,
     Directory localDir,
+    Set<String> existingFiles,
     SyncProgressCallback? onProgress,
   ) async {
-    // Parse GitHub URL: https://github.com/USER/REPO/tree/BRANCH/PATH
     final uri = Uri.parse(url);
     final segments = uri.pathSegments;
 
@@ -147,21 +169,17 @@ class AssetSyncService {
     _repo = segments[1];
     String? path;
 
-    // Extract branch and path from URL
     if (segments.length >= 4 && segments[2] == 'tree') {
       _branch = segments[3];
       if (segments.length > 4) {
         path = segments.sublist(4).join('/');
       }
     } else {
-      _branch = 'main'; // Default branch
+      _branch = 'main';
     }
 
-    debugPrint('📊 Parsed URL:');
-    debugPrint('   Owner: $_owner, Repo: $_repo');
-    debugPrint('   Branch: $_branch, Path: $path');
+    debugPrint('📊 Parsed: Owner=$_owner, Repo=$_repo, Branch=$_branch, Path=$path');
 
-    // Query GitHub API
     String apiUrl =
         'https://api.github.com/repos/$_owner/$_repo/contents/${path ?? ""}';
     if (_branch != null) {
@@ -173,33 +191,20 @@ class AssetSyncService {
 
     try {
       final response = await http
-          .get(
-            Uri.parse(apiUrl),
-            headers: {'Accept': 'application/vnd.github.v3+json'},
-          )
+          .get(Uri.parse(apiUrl), headers: {'Accept': 'application/vnd.github.v3+json'})
           .timeout(const Duration(seconds: 30));
 
       if (response.statusCode != 200) {
         debugPrint('❌ GitHub API error: ${response.statusCode}');
-        debugPrint('   ${response.body}');
         return SyncResult(failedFiles: ['API Error: ${response.statusCode}']);
       }
 
       final data = json.decode(response.body);
 
       if (data is List) {
-        // It's a directory - process it recursively
         return await _processDirectory(
-          data,
-          localDir,
-          path ?? '',
-          onProgress,
-          0.1,
-          1.0,
+          data, localDir, path ?? '', existingFiles, onProgress, 0.1, 1.0,
         );
-      } else if (data is Map && data['type'] == 'file') {
-        // Single file
-        return await _downloadSingleFile(data, localDir, path ?? '');
       }
 
       return SyncResult();
@@ -209,11 +214,11 @@ class AssetSyncService {
     }
   }
 
-  /// Process a GitHub directory recursively
   Future<SyncResult> _processDirectory(
     List<dynamic> contents,
     Directory localDir,
     String currentPath,
+    Set<String> existingFiles,
     SyncProgressCallback? onProgress,
     double progressStart,
     double progressEnd,
@@ -226,51 +231,84 @@ class AssetSyncService {
       await localDir.create(recursive: true);
     }
 
-    // Separate files and directories
     final files = contents.where((item) => item['type'] == 'file').toList();
     final dirs = contents.where((item) => item['type'] == 'dir').toList();
 
     final totalItems = files.length + dirs.length;
     var processedItems = 0;
 
-    // Process files first
+    // Process files
     for (final item in files) {
       final String name = item['name'];
       final String? downloadUrl = item['download_url'];
-      final String filePath = item['path'] ?? '$currentPath/$name';
-      final int? size = item['size'];
+      final String repoPath = item['path'] ?? '$currentPath/$name';
 
       if (downloadUrl == null) continue;
 
-      final file = File('${localDir.path}/$name');
+      // The FULL LOCAL PATH where this file should be
+      final localFilePath = '${localDir.path}/$name';
+      final file = File(localFilePath);
 
-      // Update progress
       processedItems++;
-      final progress =
-          progressStart +
+      final progress = progressStart +
           (processedItems / totalItems) * (progressEnd - progressStart);
-      onProgress?.call('Checking $name...', progress, name);
 
-      // Check if file exists and has actual content (not empty or stub)
+      // CHECK 1: Is this file already bundled in the APK?
+      final isBundled = _bundledAssetNames.contains(name);
+      debugPrint('   Checking: $name');
+      debugPrint('      Is bundled: $isBundled (bundledAssets has ${_bundledAssetNames.length} items)');
+      
+      if (isBundled) {
+        debugPrint('   ✓ SKIP (bundled in APK): $name');
+        existing.add(name);
+        onProgress?.call('Bundled: $name', progress, name);
+        continue;
+      }
+
+      // CHECK 2: Does this file already exist in our pre-scanned list?
+      final fileExists = existingFiles.contains(localFilePath);
+      
+      debugPrint('   Checking: $name');
+      debugPrint('      Local path: $localFilePath');
+      debugPrint('      In existing set: $fileExists');
+
+      if (fileExists) {
+        debugPrint('   ✓ SKIP (already exists): $name');
+        existing.add(name);
+        onProgress?.call('Already have $name', progress, name);
+        continue;
+      }
+
+      // Double-check by actually looking at the file
       if (await file.exists()) {
-        final existingSize = await file.length();
-        // Consider file valid if it exists and has content (> 500 bytes to avoid stubs)
-        if (existingSize > 500) {
-          debugPrint('   ✓ Exists: $name ($existingSize bytes)');
+        final size = await file.length();
+        if (size > 1000) {
+          debugPrint('   ✓ SKIP (found on disk): $name ($size bytes)');
           existing.add(name);
+          onProgress?.call('Already have $name', progress, name);
           continue;
-        } else {
-          debugPrint('   ⚠ File too small, re-downloading: $name ($existingSize bytes)');
         }
       }
 
-      debugPrint('   ⬇ Downloading: $name');
+      // Need to download
+      debugPrint('   ⬇ DOWNLOADING: $name');
+      debugPrint('      Download URL: $downloadUrl');
+      debugPrint('      Repo path: $repoPath');
+      debugPrint('      Local file: ${file.path}');
       onProgress?.call('Downloading $name...', progress, name);
 
       try {
-        await _downloadFileWithLfsSupport(downloadUrl, file, filePath);
+        await _downloadFile(downloadUrl, file, repoPath);
         final newSize = await file.length();
         debugPrint('   ✓ Downloaded: $name ($newSize bytes)');
+        
+        // Verify the downloaded file
+        if (newSize < 200) {
+          debugPrint('   ⚠️ WARNING: File is very small, might be corrupted!');
+          final content = await file.readAsString();
+          debugPrint('   File content preview: ${content.substring(0, content.length.clamp(0, 100))}');
+        }
+        
         downloaded.add(name);
       } catch (e) {
         debugPrint('   ✗ Failed: $name - $e');
@@ -278,7 +316,7 @@ class AssetSyncService {
       }
     }
 
-    // Process subdirectories recursively
+    // Process subdirectories
     for (final item in dirs) {
       final String name = item['name'];
       final String subdirApiUrl = item['url'];
@@ -288,34 +326,22 @@ class AssetSyncService {
       debugPrint('📂 Entering: $name/');
 
       processedItems++;
-      final progress =
-          progressStart +
+      final progress = progressStart +
           (processedItems / totalItems) * (progressEnd - progressStart);
       onProgress?.call('Syncing $name/...', progress, name);
 
       try {
         final response = await http
-            .get(
-              Uri.parse(subdirApiUrl),
-              headers: {'Accept': 'application/vnd.github.v3+json'},
-            )
+            .get(Uri.parse(subdirApiUrl), headers: {'Accept': 'application/vnd.github.v3+json'})
             .timeout(const Duration(seconds: 30));
 
         if (response.statusCode == 200) {
           final subdirContents = json.decode(response.body) as List;
           final subdirResult = await _processDirectory(
-            subdirContents,
-            subdir,
-            subdirPath,
-            onProgress,
-            progress,
-            progressEnd,
+            subdirContents, subdir, subdirPath, existingFiles, onProgress, progress, progressEnd,
           );
 
-          // Merge results
-          downloaded.addAll(
-            subdirResult.downloadedFiles.map((f) => '$name/$f'),
-          );
+          downloaded.addAll(subdirResult.downloadedFiles.map((f) => '$name/$f'));
           existing.addAll(subdirResult.existingFiles.map((f) => '$name/$f'));
           failed.addAll(subdirResult.failedFiles.map((f) => '$name/$f'));
         }
@@ -325,10 +351,6 @@ class AssetSyncService {
       }
     }
 
-    // Clean up obsolete local files
-    final remoteNames = contents.map((item) => item['name'] as String).toSet();
-    await _cleanupObsoleteFiles(localDir, remoteNames);
-
     return SyncResult(
       downloadedFiles: downloaded,
       existingFiles: existing,
@@ -336,123 +358,67 @@ class AssetSyncService {
     );
   }
 
-  /// Download a single file with Git LFS support
-  Future<SyncResult> _downloadSingleFile(
-    Map<dynamic, dynamic> item,
-    Directory localDir,
-    String filePath,
-  ) async {
-    final String name = item['name'];
-    final String? downloadUrl = item['download_url'];
-
-    if (downloadUrl == null) {
-      return SyncResult(failedFiles: [name]);
+  Future<void> _downloadFile(String url, File targetFile, String repoPath) async {
+    final parentDir = targetFile.parent;
+    if (!await parentDir.exists()) {
+      await parentDir.create(recursive: true);
     }
 
-    final file = File('${localDir.path}/$name');
-
-    // Check if file exists and has actual content (> 500 bytes)
-    if (await file.exists()) {
-      final existingSize = await file.length();
-      if (existingSize > 500) {
-        debugPrint('   ✓ Exists: $name ($existingSize bytes)');
-        return SyncResult(existingFiles: [name]);
-      }
-    }
-
-    try {
-      await _downloadFileWithLfsSupport(downloadUrl, file, filePath);
-      return SyncResult(downloadedFiles: [name]);
-    } catch (e) {
-      return SyncResult(failedFiles: [name]);
-    }
-  }
-
-  /// Download a file, automatically handling Git LFS pointers
-  Future<void> _downloadFileWithLfsSupport(
-    String url,
-    File targetFile,
-    String repoPath,
-  ) async {
-    // First, download from raw URL
-    final response = await http
-        .get(Uri.parse(url))
-        .timeout(const Duration(seconds: 60));
+    final response = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 60));
 
     if (response.statusCode != 200) {
       throw Exception('Download failed: ${response.statusCode}');
     }
 
-    // Check if this is a Git LFS pointer file
     final content = response.body;
     if (_isLfsPointer(content)) {
-      debugPrint('      🔗 Detected LFS pointer, fetching actual file...');
+      debugPrint('      🔗 LFS pointer detected, fetching actual file...');
       await _downloadLfsFile(targetFile, repoPath);
     } else {
-      // Regular file, save directly
       await targetFile.writeAsBytes(response.bodyBytes);
+      debugPrint('      ✓ Saved: ${targetFile.path}');
     }
   }
 
-  /// Check if content is a Git LFS pointer file
   bool _isLfsPointer(String content) {
-    // LFS pointer files start with "version https://git-lfs.github.com/spec/v1"
-    // and contain "oid sha256:" and "size"
     return content.startsWith('version https://git-lfs.github.com/spec/v1') &&
         content.contains('oid sha256:') &&
         content.contains('size ');
   }
 
-  /// Download the actual file from Git LFS
   Future<void> _downloadLfsFile(File targetFile, String repoPath) async {
     if (_owner == null || _repo == null || _branch == null) {
       throw Exception('Repository info not available for LFS download');
     }
 
-    // GitHub serves LFS files through media.githubusercontent.com
-    // URL format: https://media.githubusercontent.com/media/{owner}/{repo}/{branch}/{path}
+    final parentDir = targetFile.parent;
+    if (!await parentDir.exists()) {
+      await parentDir.create(recursive: true);
+    }
+
     final lfsUrl =
         'https://media.githubusercontent.com/media/$_owner/$_repo/$_branch/$repoPath';
 
-    debugPrint('      📥 LFS URL: $lfsUrl');
+    debugPrint('      📥 LFS Download:');
+    debugPrint('         Owner: $_owner');
+    debugPrint('         Repo: $_repo');
+    debugPrint('         Branch: $_branch');
+    debugPrint('         RepoPath: $repoPath');
+    debugPrint('         Full URL: $lfsUrl');
 
     final response = await http
         .get(Uri.parse(lfsUrl))
-        .timeout(
-          const Duration(seconds: 120), // LFS files can be large
-        );
+        .timeout(const Duration(seconds: 120));
+
+    debugPrint('         Response status: ${response.statusCode}');
+    debugPrint('         Response size: ${response.bodyBytes.length} bytes');
 
     if (response.statusCode == 200) {
       await targetFile.writeAsBytes(response.bodyBytes);
-      debugPrint(
-        '      ✓ LFS download complete (${response.bodyBytes.length} bytes)',
-      );
+      debugPrint('      ✓ LFS saved: ${targetFile.path}');
+      debugPrint('      ✓ Size: ${response.bodyBytes.length} bytes');
     } else {
       throw Exception('LFS download failed: ${response.statusCode}');
-    }
-  }
-
-  /// Remove local files that no longer exist in remote
-  Future<void> _cleanupObsoleteFiles(
-    Directory dir,
-    Set<String> remoteNames,
-  ) async {
-    if (!await dir.exists()) return;
-
-    final localEntities = dir.listSync();
-    for (final entity in localEntities) {
-      final name = entity.uri.pathSegments.last;
-      // Skip hidden files like .gitkeep
-      if (name.startsWith('.')) continue;
-
-      if (!remoteNames.contains(name)) {
-        debugPrint('   🗑 Removing obsolete: $name');
-        try {
-          await entity.delete(recursive: true);
-        } catch (e) {
-          debugPrint('   ✗ Failed to delete: $name');
-        }
-      }
     }
   }
 }
